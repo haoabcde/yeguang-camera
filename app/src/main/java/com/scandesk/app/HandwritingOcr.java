@@ -88,12 +88,21 @@ final class HandwritingOcr implements AutoCloseable {
         final String alternative;
         final RectF bounds;
         final boolean uncertain;
+        final float confidence;
+        final float alternativeConfidence;
 
         Line(String text, String alternative, RectF bounds, boolean uncertain) {
+            this(text, alternative, bounds, uncertain, Float.NaN, Float.NaN);
+        }
+
+        Line(String text, String alternative, RectF bounds, boolean uncertain,
+                float confidence, float alternativeConfidence) {
             this.text = text;
             this.alternative = alternative;
             this.bounds = new RectF(bounds);
             this.uncertain = uncertain;
+            this.confidence = confidence;
+            this.alternativeConfidence = alternativeConfidence;
         }
     }
 
@@ -144,7 +153,9 @@ final class HandwritingOcr implements AutoCloseable {
                         uncertain = true;
                     }
                     lines.add(new Line(text, agrees ? "" : alternative,
-                            bounds(box, bitmap.getWidth(), bitmap.getHeight()), uncertain));
+                            bounds(box, bitmap.getWidth(), bitmap.getHeight()), uncertain,
+                            precise.getFirst().trim().isEmpty() ? fast.getSecond() : precise.getSecond(),
+                            fast.getSecond()));
                 } finally {
                     crop.release();
                     clean.release();

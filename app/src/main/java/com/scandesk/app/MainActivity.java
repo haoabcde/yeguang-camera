@@ -1556,11 +1556,7 @@ public final class MainActivity extends ComponentActivity {
                         words -> textResult("提取文字", String.join("\n\n", words)), null);
                 break;
             case EXCEL:
-                prepareFile(FileFormat.XLSX, title, (output, state) -> {
-                    List<OfficeTable> tables = PdfTools.tables(pdfStore, picked, getAssets(), state::progress);
-                    if (tables.isEmpty()) throw new IOException("所选页面未识别出表格");
-                    OfficeExport.excel(tables, output);
-                });
+                choosePdfTableMode(picked, title);
                 break;
             case PNG:
                 savePng(pdfFileTitle(current) + " - 第 " + (current.index + 1) + " 页",
@@ -1727,7 +1723,7 @@ public final class MainActivity extends ComponentActivity {
                 recognizeWord(ScanRecognition.HANDWRITING);
                 break;
             case TABLE:
-                recognizeTables(ScanRecognition.EXCEL);
+                chooseTableMode();
                 break;
             case HAND_TABLE:
                 recognizeTables(ScanRecognition.HAND_TABLE);
@@ -2070,7 +2066,7 @@ public final class MainActivity extends ComponentActivity {
         sheet.option(R.drawable.ic_image, "校正图片", "导出当前页为 JPG 或 PNG",
                 false, this::imageFormats);
         sheet.option(R.drawable.ic_table, "Excel 表格", "识别表格，校对后保存为 .xlsx",
-                false, () -> recognizeTables(ScanRecognition.EXCEL));
+                false, this::chooseTableMode);
         sheet.option(R.drawable.ic_table, "手写转 Excel", "识别手写表格，对照原图逐格校对", false,
                 () -> recognizeTables(ScanRecognition.HAND_TABLE));
         sheet.option(R.drawable.ic_document, "Word 文档", "提取文字，校对后保存为 .docx",
@@ -2144,15 +2140,37 @@ public final class MainActivity extends ComponentActivity {
         checkDraft(key, () -> loadTables(key, false));
     }
 
+    private void chooseTableMode() {
+        new AlertDialog.Builder(this).setTitle("选择文字类型")
+                .setMessage("有手写填写、手写清单或印刷与手写混排时，请选手写或混合。")
+                .setPositiveButton("印刷表格", (dialog, which) -> recognizeTables(ScanRecognition.EXCEL))
+                .setNeutralButton("手写或混合", (dialog, which) -> recognizeTables(ScanRecognition.HAND_TABLE))
+                .setNegativeButton("取消", null).show();
+    }
+
+    private void choosePdfTableMode(List<PdfWorkspace.Page> picked, String title) {
+        new AlertDialog.Builder(this).setTitle("选择文字类型")
+                .setMessage("PDF 中有手写填写时，请选手写或混合。所有选中页通过质量检查后才会生成文件。")
+                .setPositiveButton("印刷表格", (dialog, which) -> exportPdfTables(picked, title, false))
+                .setNeutralButton("手写或混合", (dialog, which) -> exportPdfTables(picked, title, true))
+                .setNegativeButton("取消", null).show();
+    }
+
+    private void exportPdfTables(List<PdfWorkspace.Page> picked, String title, boolean handwriting) {
+        prepareFile(FileFormat.XLSX, title, (output, state) -> {
+            List<OfficeTable> tables = PdfTools.tables(pdfStore, picked, getAssets(), state::progress, handwriting);
+            OfficeExport.excel(tables, output);
+        });
+    }
+
     private void loadTables(String key, boolean rerun) {
         ScanDocument current = document;
         boolean handwriting = ScanRecognition.HAND_TABLE.equals(key);
         task(handwriting ? "识别手写表格" : "识别表格", true, state -> {
             org.json.JSONObject saved = rerun ? null : store.loadReview(current, key);
             if (saved != null) return ScanRecognition.TableDraft.from(saved);
-            ScanRecognition.TableDraft draft = handwriting
-                    ? ScanRecognition.handwrittenTables(getAssets(), store, current, state::progress)
-                    : ScanRecognition.tables(getAssets(), store, current, state::progress);
+            ScanRecognition.TableDraft draft = ScanRecognition.checkedTables(
+                    getAssets(), store, current, handwriting, state::progress);
             if (draft.tables.isEmpty()) {
                 throw new IOException(handwriting ? "未识别到手写条目。可裁切到填写区域，确认字迹清晰后重试"
                         : "未识别到表格。可先裁切到表格区域、增强清晰度后重试");
@@ -2161,6 +2179,19 @@ public final class MainActivity extends ComponentActivity {
             store.saveReview(current, key, draft.json());
             return draft;
         }, draft -> {
+            if (!rerun && !draft.checkedFor(key)) {
+                new AlertDialog.Builder(this).setTitle("旧版校对稿未经过质量检查")
+                        .setMessage("原有修改已保留。可对照原图继续校对，或按所选文字类型重新识别。")
+                        .setNegativeButton("取消", null)
+                        .setNeutralButton("继续校对旧稿", (dialog, which) -> openTableDraft(key, draft, false))
+                        .setPositiveButton("重新识别", (dialog, which) -> loadTables(key, true)).show();
+                return;
+            }
+            openTableDraft(key, draft, rerun);
+        }, () -> loadTables(key, rerun));
+    }
+
+    private void openTableDraft(String key, ScanRecognition.TableDraft draft, boolean rerun) {
             boolean switched = !key.equals(tableReviewKey);
             tableReviewKey = key;
             tableDraft = draft;
@@ -2176,7 +2207,6 @@ public final class MainActivity extends ComponentActivity {
             }
             screen = Screen.EXCEL;
             render();
-        }, () -> loadTables(key, rerun));
     }
 
     private void checkDraft(String type, Runnable recognize) {
@@ -2191,11 +2221,16 @@ public final class MainActivity extends ComponentActivity {
                     .setNegativeButton("取消", null)
                     .setNeutralButton("导出旧稿", (dialog, which) -> {
                         boolean excel = ScanRecognition.EXCEL.equals(type) || ScanRecognition.HAND_TABLE.equals(type);
-                        prepareFile(excel ? FileFormat.XLSX : FileFormat.DOCX, current.name + " - 调整前",
-                                (stream, export) -> {
+                        Runnable export = () -> prepareFile(excel ? FileFormat.XLSX : FileFormat.DOCX, current.name + " - 调整前",
+                                (stream, exportState) -> {
                                     if (excel) OfficeExport.excel(ScanRecognition.TableDraft.from(previous).tables, stream);
                                     else OfficeExport.word(ScanRecognition.WordDraft.from(previous).pages, stream);
                                 });
+                        if (excel) new AlertDialog.Builder(this).setTitle("确认旧表格内容")
+                                .setMessage("旧稿不会按当前图片重新识别。请核对漏项、错字和行列对应后再导出。")
+                                .setNegativeButton("取消", null)
+                                .setPositiveButton("已核对，导出", (d, w) -> export.run()).show();
+                        else export.run();
                     })
                     .setPositiveButton("重新识别", (dialog, which) -> recognize.run()).show();
         }, null);
@@ -2339,7 +2374,7 @@ public final class MainActivity extends ComponentActivity {
     private View tableEditor() {
         LinearLayout layout = ui.vertical();
         boolean handwriting = ScanRecognition.HAND_TABLE.equals(tableReviewKey);
-        layout.addView(ui.header(handwriting ? "校对手写表格" : "校对表格", this::navigateBack,
+        layout.addView(ui.header(handwriting ? "校对手写表格" : "校对印刷表格", this::navigateBack,
                 "导出 Excel", this::exportExcel));
         layout.addView(ui.rule());
         List<OfficeTable> tables = tableDraft.tables;
@@ -2383,6 +2418,11 @@ public final class MainActivity extends ComponentActivity {
                     }
                 }));
         layout.addView(tableViewportTools(current, grid), new LinearLayout.LayoutParams(ui.match(), ui.wrap()));
+        if (!tableDraft.checkedFor(tableReviewKey)) {
+            TextView warning = ui.text("旧版识别稿未检查，导出前请逐项对照原图。", 13, ScanUi.ACCENT);
+            warning.setPadding(ui.dp(16), ui.dp(8), ui.dp(16), ui.dp(8));
+            layout.addView(warning);
+        }
         if (!tableDraft.skipped.isEmpty() || current.inferred) {
             String hint = current.inferred ? "已按文字位置推断行列，请依据原图核对。" : "";
             if (!tableDraft.skipped.isEmpty()) hint += "未识别到表格的页码：" + joined(tableDraft.skipped) + "。";
@@ -2537,7 +2577,7 @@ public final class MainActivity extends ComponentActivity {
             if (arranged[0] == null) return;
             List<OfficeTable> tables = new ArrayList<>(tableDraft.tables);
             tables.set(index, arranged[0]);
-            ScanRecognition.TableDraft updated = new ScanRecognition.TableDraft(tables, tableDraft.skipped);
+            ScanRecognition.TableDraft updated = tableDraft.withTables(tables);
             try {
                 store.saveReview(document, tableReviewKey, updated.json());
             } catch (Exception failure) {
@@ -2831,12 +2871,29 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void exportExcel() {
+        if (!tableDraft.checkedFor(tableReviewKey)) {
+            new AlertDialog.Builder(this).setTitle("请先核对旧版识别稿")
+                    .setMessage("这份稿件没有新版质量检查记录，可能含有漏项、错字或错列。原有修改会保留。")
+                    .setNegativeButton("继续校对", null)
+                    .setNeutralButton("重新识别", (dialog, which) -> loadTables(tableReviewKey, true))
+                    .setPositiveButton("我已核对，导出", (dialog, which) -> confirmExcel()).show();
+            return;
+        }
+        confirmExcel();
+    }
+
+    private void confirmExcel() {
         int pending = ScanRecognition.HAND_TABLE.equals(tableReviewKey) ? unreviewedCount() : 0;
         if (pending > 0) {
             new AlertDialog.Builder(this).setTitle("还有 " + pending + " 格未核对")
                     .setMessage("可先对照原图确认，也可按当前内容生成 Excel。")
                     .setNegativeButton("仍然导出", (d, which) -> writeExcel())
                     .setPositiveButton("继续核对", (d, which) -> nextPendingCell()).show();
+        } else if (ScanRecognition.EXCEL.equals(tableReviewKey)) {
+            new AlertDialog.Builder(this).setTitle("确认表格内容")
+                    .setMessage("质量检查不能保证每个字都正确，请核对编号、金额及行列对应。")
+                    .setNegativeButton("继续校对", null)
+                    .setPositiveButton("已核对，导出", (dialog, which) -> writeExcel()).show();
         } else writeExcel();
     }
 
@@ -3059,7 +3116,9 @@ public final class MainActivity extends ComponentActivity {
                 main.post(() -> {
                     if (complete(state)) {
                         if (state.cancelled.get()) toast("已取消");
-                        else error(message(title, failure), retry);
+                        else if (failure instanceof ScanRecognition.UnreliableRecognition) {
+                            recognitionIssue((ScanRecognition.UnreliableRecognition) failure, retry);
+                        } else error(message(title, failure), retry);
                     }
                 });
             } catch (OutOfMemoryError memory) {
@@ -3157,6 +3216,21 @@ public final class MainActivity extends ComponentActivity {
         AlertDialog.Builder dialog = new AlertDialog.Builder(this).setMessage(text);
         if (retry == null) dialog.setPositiveButton("知道了", null);
         else dialog.setPositiveButton("重试", (ignored, which) -> retry.run()).setNegativeButton("关闭", null);
+        dialog.show();
+    }
+
+    private void recognitionIssue(ScanRecognition.UnreliableRecognition failure, Runnable retry) {
+        String hint = failure.handwriting ? "字迹可能过小、模糊，或两路识别分歧较大。可裁切到文字区域后重试。"
+                : "如果包含手写填写，请改用手写或混合；印刷内容可裁切、调整清晰度后重试。";
+        AlertDialog.Builder dialog = new AlertDialog.Builder(this)
+                .setTitle((screen == Screen.PDF ? "所选第 " : "第 ") + failure.page + " 页识别不可靠")
+                .setMessage(hint + "\n未保存新表格，原图和已有校对稿已保留。")
+                .setNegativeButton("返回原图", null);
+        if (retry != null) dialog.setPositiveButton("重试", (d, which) -> retry.run());
+        dialog.setNeutralButton("选择文字类型", (d, which) -> {
+            if (screen == Screen.PDF) runPdfTool(PdfTool.EXCEL);
+            else chooseTableMode();
+        });
         dialog.show();
     }
 

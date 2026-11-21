@@ -58,7 +58,7 @@ public final class TableViewportFlowTest {
                     new OfficeTable.Cell(1, 0, 1, 1, "001"), new OfficeTable.Cell(1, 1, 1, 1, "样张")));
             sheet.columnWidths[0] = 168;
             sheet.rowHeights[1] = 72;
-            store.saveReview(doc, key, new ScanRecognition.TableDraft(List.of(sheet), List.of()).json());
+            store.saveReview(doc, key, new ScanRecognition.TableDraft(List.of(sheet), List.of()).checked(key).json());
         }
         assertTrue(preferences.edit().putString("document", doc.id).putString("page", page.id)
                 .putBoolean("crop", false).commit());
@@ -168,6 +168,7 @@ public final class TableViewportFlowTest {
     private void open(String format) {
         tap("导出");
         tap(format);
+        if ("Excel 表格".equals(format)) tap("印刷表格");
         node("导出 Excel");
     }
 

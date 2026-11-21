@@ -176,9 +176,25 @@ final class PdfTools {
 
     static List<OfficeTable> tables(PdfWorkspace workspace, List<PdfWorkspace.Page> pages, AssetManager assets,
             ScanExport.Progress progress) throws IOException {
-        try (ScanRecognition.Reader ocr = new ScanRecognition.Reader(assets)) {
+        return tables(workspace, pages, assets, progress, false);
+    }
+
+    static List<OfficeTable> tables(PdfWorkspace workspace, List<PdfWorkspace.Page> pages, AssetManager assets,
+            ScanExport.Progress progress, boolean handwriting) throws IOException {
+        try (ScanRecognition.Reader ocr = handwriting ? null : new ScanRecognition.Reader(assets);
+                HandwritingOcr written = handwriting ? new HandwritingOcr(assets) : null) {
             List<List<OfficeTable>> perPage = readPages(workspace, pages, progress,
-                    (source, page, position) -> ocr.tables(render(source, page, ScanImages.OCR_EDGE), position));
+                    (source, page, position) -> {
+                        Bitmap image = render(source, page, ScanImages.OCR_EDGE);
+                        List<OfficeTable> matches;
+                        if (handwriting) {
+                            try { matches = ScanRecognition.checkedHandwriting(written, image, position,
+                                    () -> { if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException(); }); }
+                            finally { image.recycle(); }
+                        } else matches = ocr.checkedTables(image, position);
+                        if (matches.isEmpty()) throw new ScanRecognition.UnreliableRecognition(position, handwriting, "no_table");
+                        return matches;
+                    });
             List<OfficeTable> result = new ArrayList<>();
             for (List<OfficeTable> matches : perPage) result.addAll(matches);
             return result;

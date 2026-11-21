@@ -119,6 +119,56 @@ final class ScanRecognition {
         return new TableDraft(tables, skipped);
     }
 
+    /** App entry point: validate every selected page before constructing/saving a review draft. */
+    static TableDraft checkedTables(AssetManager assets, ScanStore store, ScanDocument document,
+            boolean handwriting, ScanExport.Progress progress) throws IOException {
+        List<OfficeTable> tables = new ArrayList<>();
+        try (Reader printed = handwriting ? null : new Reader(assets);
+                HandwritingOcr written = handwriting ? new HandwritingOcr(assets) : null) {
+            for (int i = 0; i < document.pages.size(); i++) {
+                checkInterrupted();
+                ScanDocument.Page page = document.pages.get(i);
+                Bitmap image = handwriting ? ScanImages.renderWord(store.image(document, page), page)
+                        : ScanImages.renderTable(store.image(document, page), page);
+                List<OfficeTable> pageTables;
+                if (handwriting) {
+                    int completed = i;
+                    try {
+                        pageTables = checkedHandwriting(written, image, i + 1,
+                                () -> progress.page(completed, document.pages.size()));
+                    } finally { image.recycle(); }
+                } else pageTables = printed.checkedTables(image, i + 1);
+                if (pageTables.isEmpty()) throw new UnreliableRecognition(i + 1, handwriting, "no_table");
+                tables.addAll(pageTables);
+                progress.page(i + 1, document.pages.size());
+            }
+        }
+        return new TableDraft(tables, Collections.emptyList()).checked(handwriting ? HAND_TABLE : EXCEL);
+    }
+
+    static List<OfficeTable> checkedHandwriting(HandwritingOcr reader, Bitmap image, int page,
+            Runnable checkpoint) throws IOException {
+        List<HandwritingOcr.Line> lines = reader.tableLines(image, checkpoint);
+        List<RecognitionQuality.Sample> samples = new ArrayList<>();
+        for (HandwritingOcr.Line line : lines) samples.add(new RecognitionQuality.Sample(
+                line.text, line.confidence, line.alternative, line.alternativeConfidence));
+        RecognitionQuality.Result quality = RecognitionQuality.handwritten(samples);
+        if (!quality.reliable) throw new UnreliableRecognition(page, true, quality.reason);
+        return TableVision.handwritten(image, lines, page);
+    }
+
+    static final class UnreliableRecognition extends IOException {
+        final int page;
+        final boolean handwriting;
+        final String reason;
+        UnreliableRecognition(int page, boolean handwriting, String reason) {
+            super("第 " + page + " 页识别不可靠，未生成新表格");
+            this.page = page;
+            this.handwriting = handwriting;
+            this.reason = reason;
+        }
+    }
+
     private static void checkInterrupted() throws IOException {
         if (Thread.currentThread().isInterrupted()) throw new IOException("已取消");
     }
@@ -185,6 +235,14 @@ final class ScanRecognition {
 
         // The explicit native-size path is used by the local regression harness for paired comparisons.
         List<OfficeTable> tables(Bitmap bitmap, int page, boolean enlargeSmall) throws IOException {
+            return tables(bitmap, page, enlargeSmall, false);
+        }
+
+        List<OfficeTable> checkedTables(Bitmap bitmap, int page) throws IOException {
+            return tables(bitmap, page, true, true);
+        }
+
+        private List<OfficeTable> tables(Bitmap bitmap, int page, boolean enlargeSmall, boolean checked) throws IOException {
             Bitmap working = bitmap;
             try {
                 checkInterrupted();
@@ -202,7 +260,29 @@ final class ScanRecognition {
                 checkInterrupted();
                 Bitmap ready = working;
                 working = null; // read owns this bitmap, including asynchronous cancellation cleanup.
-                return read(ready, page, (image, text, ocr) -> TableVision.recognize(image, text, ocr, page));
+                return read(ready, page, (image, text, ocr) -> {
+                    if (checked) {
+                        List<RecognitionQuality.Sample> samples = new ArrayList<>();
+                        for (Text.TextBlock block : text.getTextBlocks()) for (Text.Line line : block.getLines()) {
+                            Float confidence = line.getConfidence();
+                            samples.add(new RecognitionQuality.Sample(line.getText(),
+                                    confidence == null ? Float.NaN : confidence, "", Float.NaN));
+                        }
+                        RecognitionQuality.Result quality = RecognitionQuality.printed(samples);
+                        if (!quality.reliable && !samples.isEmpty()) {
+                            // ML Kit scores are not calibrated accuracy. Before rejecting a page,
+                            // corroborate its text with the existing independent mobile reader.
+                            samples.clear();
+                            for (Text.TextBlock block : text.getTextBlocks()) for (Text.Line line : block.getLines()) {
+                                checkInterrupted();
+                                samples.add(ocr.verifyLine(line.getText(), line.getBoundingBox()));
+                            }
+                            quality = RecognitionQuality.printed(samples);
+                        }
+                        if (!quality.reliable) throw new UnreliableRecognition(page, false, quality.reason);
+                    }
+                    return TableVision.recognize(image, text, ocr, page);
+                });
             } finally {
                 if (working != null) working.recycle();
             }
@@ -432,16 +512,36 @@ final class ScanRecognition {
     static final class TableDraft {
         final List<OfficeTable> tables;
         final List<Integer> skipped;
+        private int qualityVersion;
+        private String recognitionMode = "";
 
         TableDraft(List<OfficeTable> tables, List<Integer> skipped) {
             this.tables = tables;
             this.skipped = skipped;
         }
 
+        TableDraft checked(String mode) {
+            qualityVersion = RecognitionQuality.VERSION;
+            recognitionMode = mode;
+            return this;
+        }
+
+        boolean checkedFor(String mode) {
+            return qualityVersion == RecognitionQuality.VERSION && recognitionMode.equals(mode) && skipped.isEmpty();
+        }
+
+        TableDraft withTables(List<OfficeTable> updated) {
+            TableDraft draft = new TableDraft(updated, skipped);
+            draft.qualityVersion = qualityVersion;
+            draft.recognitionMode = recognitionMode;
+            return draft;
+        }
+
         JSONObject json() throws JSONException {
             JSONArray values = new JSONArray();
             for (OfficeTable table : tables) values.put(table.json());
-            return new JSONObject().put("tables", values).put("skipped", new JSONArray(skipped));
+            return new JSONObject().put("tables", values).put("skipped", new JSONArray(skipped))
+                    .put("qualityVersion", qualityVersion).put("recognitionMode", recognitionMode);
         }
 
         static TableDraft from(JSONObject json) throws JSONException {
@@ -451,7 +551,10 @@ final class ScanRecognition {
             List<Integer> skipped = new ArrayList<>();
             JSONArray missing = json.getJSONArray("skipped");
             for (int i = 0; i < missing.length(); i++) skipped.add(missing.getInt(i));
-            return new TableDraft(tables, skipped);
+            TableDraft draft = new TableDraft(tables, skipped);
+            draft.qualityVersion = json.optInt("qualityVersion");
+            draft.recognitionMode = json.optString("recognitionMode");
+            return draft;
         }
     }
 }

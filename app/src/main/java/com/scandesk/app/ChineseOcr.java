@@ -111,6 +111,34 @@ final class ChineseOcr implements AutoCloseable {
             return readRegion(region, true);
         }
 
+        RecognitionQuality.Sample verifyLine(String original, Rect bounds) throws IOException {
+            if (Thread.currentThread().isInterrupted()) throw new IOException("已取消");
+            if (bounds == null || bounds.isEmpty()) {
+                return new RecognitionQuality.Sample(original, Float.NaN, "", Float.NaN);
+            }
+            Rect area = new Rect(bounds);
+            int padding = Math.max(2, Math.round(bounds.height() * .10f));
+            area.inset(-padding, -padding);
+            if (!area.intersect(0, 0, bitmap.getWidth(), bitmap.getHeight())) {
+                return new RecognitionQuality.Sample(original, Float.NaN, "", Float.NaN);
+            }
+            ScanImages.requireVision();
+            Bitmap section = Bitmap.createBitmap(bitmap, area.left, area.top, area.width(), area.height());
+            Mat crop = null;
+            try {
+                crop = com.paddle.ocr.util.BitmapUtils.INSTANCE.bitmapToBGRMat(section);
+                Pair<String, Float> result = handwritingResult(crop, true);
+                String comparison = result.getFirst().trim();
+                float support = result.getSecond() * RecognitionQuality.agreement(original, comparison);
+                return new RecognitionQuality.Sample(original, support, comparison, result.getSecond());
+            } catch (OrtException failure) {
+                throw new IOException("无法复核识别结果，请重试", failure);
+            } finally {
+                if (crop != null) crop.release();
+                if (section != bitmap) section.recycle();
+            }
+        }
+
         private String readRegion(Rect region, boolean isolatedCell) {
             int contentWidth = (int) Math.ceil((double) HEIGHT * region.width() / region.height());
             if (contentWidth > MAX_WIDTH) return "";
@@ -183,6 +211,9 @@ final class ChineseOcr implements AutoCloseable {
             FloatBuffer buffer = output.getFloatBuffer();
             float[] scores = new float[buffer.remaining()];
             buffer.get(scores);
+            for (float score : scores) {
+                if (!Float.isFinite(score)) throw new IOException("识别输出异常，请重试");
+            }
             Pair<String, Float> decoded = CTCDecoder.INSTANCE.decode(scores, shape,
                     alphabet.subList(1, alphabet.size())).get(0);
             return decoded;
