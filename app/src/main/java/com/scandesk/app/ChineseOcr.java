@@ -53,6 +53,8 @@ final class ChineseOcr implements AutoCloseable {
     private OrtSession session;
     private List<String> alphabet;
     private boolean unavailable;
+    private TableStructureOcr tableStructure;
+    private boolean structureUnavailable;
 
     ChineseOcr(AssetManager assets) {
         this(assets, "ppocrv5-mobile-rec.onnx");
@@ -72,6 +74,20 @@ final class ChineseOcr implements AutoCloseable {
 
         private Page(Bitmap bitmap) {
             this.bitmap = bitmap;
+        }
+
+        TableStructureOcr.Result structure(Rect region) throws IOException {
+            if (Thread.currentThread().isInterrupted()) throw new IOException("已取消");
+            if (structureUnavailable) return null;
+            try {
+                if (tableStructure == null) tableStructure = new TableStructureOcr(assets);
+                return tableStructure.recognize(bitmap, region);
+            } catch (IOException | OrtException | RuntimeException | LinkageError failure) {
+                if (Thread.currentThread().isInterrupted()) throw new IOException("已取消", failure);
+                structureUnavailable = true;
+                Log.w(TAG, "Table structure recognition unavailable; retaining geometry", failure);
+                return null;
+            }
         }
 
         String refine(String text, Rect bounds, Rect cell) {
@@ -320,11 +336,16 @@ final class ChineseOcr implements AutoCloseable {
     }
 
     @Override public void close() {
-        if (session == null) return;
         try {
-            session.close();
+            if (tableStructure != null) tableStructure.close();
         } catch (OrtException failure) {
-            Log.w(TAG, "Unable to close recognition session", failure);
+            Log.w(TAG, "Unable to close table structure session", failure);
+        } finally {
+            try {
+                if (session != null) session.close();
+            } catch (OrtException failure) {
+                Log.w(TAG, "Unable to close recognition session", failure);
+            }
         }
     }
 }

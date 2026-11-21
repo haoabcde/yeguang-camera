@@ -299,11 +299,34 @@ final class HandwritingOcr implements AutoCloseable {
         return 255;
     }
 
+    /** Detection-only access for content-preservation checks. ChineseOcr models
+     * remain lazy: this call never loads either recognition model. RunOptions is
+     * owned by the caller so its cancellation guard can terminate native work.
+     */
+    List<OCRBox> detectText(Bitmap bitmap, Runnable checkpoint, OrtSession.RunOptions options)
+            throws OrtException, IOException {
+        checkpoint.run();
+        Mat source = BitmapUtils.INSTANCE.bitmapToBGRMat(bitmap);
+        try {
+            List<OCRBox> boxes = detect(source, options);
+            checkpoint.run();
+            return boxes;
+        } finally {
+            source.release();
+        }
+    }
+
     private List<OCRBox> detect(Mat source) throws OrtException, IOException {
+        return detect(source, null);
+    }
+
+    private List<OCRBox> detect(Mat source, OrtSession.RunOptions options) throws OrtException, IOException {
         DetPreprocessResult data = DetPreprocessor.INSTANCE.preprocess(source, 960, "resize_long", 960, "BGR");
         try (OnnxTensor input = OnnxTensor.createTensor(environment, FloatBuffer.wrap(data.getTensorData()),
                     data.getShape());
-                OrtSession.Result result = detector.run(Collections.singletonMap("x", input))) {
+                OrtSession.Result result = options == null
+                        ? detector.run(Collections.singletonMap("x", input))
+                        : detector.run(Collections.singletonMap("x", input), options)) {
             OnnxTensor output = (OnnxTensor) result.get(0);
             long[] shape = output.getInfo().getShape();
             if (shape.length != 4 || shape[0] != 1 || shape[1] != 1) throw new IOException("手写检测结果无效");

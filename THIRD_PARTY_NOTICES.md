@@ -5,6 +5,8 @@
 | 组件 | 项目中的用途与条款 |
 | --- | --- |
 | PaddleOCR、PP-OCRv5 | 行检测、文字识别和字符表。PaddlePaddle 发布的三个 ONNX 模型使用 Apache-2.0。移动版识别字典取自同版配置。其余两份模型的固定版本、摘要，以及 Android 文字行组件所取的上游提交均记录在案。[移动识别模型](https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_rec_onnx/tree/ed152b8b495f84de93cda5709d768548a9127622) · [检测、大型识别模型与 SDK 来源](app/src/main/assets/licenses/paddleocr-handwriting.txt) · [许可](app/src/main/assets/licenses/paddleocr.txt) |
+| UVDoc | 单页曲面展平。PaddlePaddle 发布的 ONNX 权重为 Apache-2.0，Android 使用保留原权重的网格子图和分条重采样；原始 UVDoc 项目为 MIT。固定版本、修改方式、摘要与重建方法见[模型声明](app/src/main/assets/licenses/uvdoc.txt)。 |
+| SLANet_plus、PaddleX | 表格结构、跨行跨列与单元格位置。官方 ONNX 权重、字典及适配的预处理、解码流程为 Apache-2.0；匹配保留原始 OCR 字符串。[版本、修改与许可](app/src/main/assets/licenses/slanet-plus.txt) |
 | ONNX Runtime Android | Microsoft 的模型推理运行时。主体使用 MIT，随附组件各自适用上游许可。[MIT 许可](app/src/main/assets/licenses/onnxruntime.txt) · [上游第三方声明](app/src/main/assets/licenses/onnxruntime-third-party.txt) |
 | OpenCV、LLVM libc++ | 图像处理使用 OpenCV 4.11。构建另从 4.12 的 Android 包取得 libc++ 运行库。OpenCV 使用 Apache-2.0，libc++ 使用含 LLVM 例外的许可证。[OpenCV](https://opencv.org/license/) · [LLVM 许可及例外](app/src/main/assets/licenses/llvm-runtime.txt) |
 | AndroidX、CameraX、AndroidX Test | Android 界面、拍摄和仪器测试依赖，由 Gradle 解析。各制品保留 Android Open Source Project 及贡献者的声明。[AndroidX](https://android.googlesource.com/platform/frameworks/support/+/androidx-main/LICENSE.txt) |

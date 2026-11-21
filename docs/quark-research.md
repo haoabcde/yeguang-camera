@@ -1,6 +1,6 @@
 # 夸克扫描王的扫描流程与页光相机的实现
 
-2026 年 11 月 21 日核查。页光目前能在离线 Android 上从手拍照片生成可编辑的 Word 和 Excel。对照夸克公开能力，下一步最值得补的是**拍摄前发现问题、弯曲书页展平、复杂表格的行列还原**。这三项分别处理离开现场才发现拍糊、书脊附近的字始终弯曲、文字读对却进了错误单元格的问题。
+2026 年 11 月 21 日核查。页光能在离线 Android 上从手拍照片生成可编辑的 Word 和 Excel。对照夸克公开能力，本轮在 rc.11 的基础上补充**拍摄前发现问题、弯曲书页展平、复杂表格的行列还原**，分别处理离开现场才发现拍糊、书脊附近字行弯曲、文字读对却进了错误单元格的问题。
 
 ## 夸克公开了哪些原理
 
@@ -20,7 +20,15 @@
 | 校对与更正 | 产品官网展示按字或段选择复制、转 Office 后编辑。所查资料未给出其置信度阈值或逐格复核规则。[产品官网](https://scan.quark.cn/) | 页光保留文字、原图框、备选和人工核对状态。上述清单的 3 处明确错读都提示存疑，11 条清楚但存疑的记录里有 8 条首选已正确。其中 1 处错读连备选也错。应同时衡量漏报与打扰次数。rc.11 允许先看存疑项，重新分列保留更正，真实导出回读的 120 格内容及类型与调整前一致。[表格数据](../app/src/main/java/com/scandesk/app/OfficeTable.java) · [校对流程](../app/src/main/java/com/scandesk/app/MainActivity.java) |
 | 导出、找回与离线 | 提供图转 PDF、Word、Excel，以及集中管理、搜索和跨端同步。2024 年 6 月版独立 App 隐私政策专门说明离线扫描本地处理，以及一般保存和转换保存的云端路径。[格式转换](https://www.quark.cn/documents/help/format-conversion) · [搜索与同步](https://www.quark.cn/documents/help/scan-view-search) · [独立 App 隐私政策](https://terms.alicdn.com/legal-agreement/terms/c_end_product_protocol/20230704104443733/20230704104443733.html) | 页光从扫描页逐页写图片 PDF。Office 输出可以编辑，本机可按已校对文字找回。扫描件库和库外 PDF 文件各有自己的管理范围。主应用清单移除联网权限，Android 系统选择器允许用户指定文件提供方。换机恢复编辑草稿仍待开发。搜索已有扫描件与在外部阅读器搜索图片 PDF 的文字是两个能力。[PDF 输出](../app/src/main/java/com/scandesk/app/ScanExport.java) · [检索](../app/src/main/java/com/scandesk/app/DocumentSearch.java) · [应用权限](../app/src/main/AndroidManifest.xml) · [Android 文件选择器](https://developer.android.com/training/data-storage/shared/documents-files) |
 
-## 优先试做的三项能力
+## rc.12 的实现与后续验收
+
+拍前引导沿用 CameraX 官方 ImageAnalysis 与坐标转换，并参考 [android/camera-samples](https://github.com/android/camera-samples)。分析与拍照共享 ViewPort，单线程只处理最新帧，间隔至少 350 ms，提示暗光、局部过亮、纸边不全、距离、模糊与移动；稳定后仍由用户按快门。不支持三路 UseCase 的相机回退至普通拍摄。亮斑判断是提示，不能保证发现每一处反光遮字；真机上的误提示、焦点与性能仍需测量。[CameraX 坐标说明](https://developer.android.com/media/camera/camerax/transform-output) · [引导实现](../app/src/main/java/com/scandesk/app/CaptureGuidance.java)
+
+曲面展平使用官方 UVDoc ONNX 的网格子图，保留原权重，将大图重采样改为 Android 分条执行，避免全分辨率浮点图像和位移图同时驻留。模型接收已裁切、转正的单页原色图，限制长边 3000 像素。输出先作几何和内容保护检查，复用现有文字检测器检查短页眉、页码和页脚，检测失败也会停止应用；再显示可缩放的前后对照，由用户确认。自动纸边也按实际轮廓向外包络，无法安全保全弯曲页边时保留完整原图。原始照片、原来的裁切、方向和滤镜设置保留，恢复时切回原稿；展平后重新识别，旧校对稿标为过期，避免把旧来源框套到变形后的图上。子图修改、摘要与重建步骤见[UVDoc 声明](../app/src/main/assets/licenses/uvdoc.txt)和[重建脚本](../tools/prepare_uvdoc.py)。
+
+复杂印刷表格使用原 OCR 字符串与 SLANet_plus 的单元格、跨行跨列结构匹配，保留可靠的格线结果，并为候选区域补充结构识别。只有存在重复列锚点与贯通空白等明确证据时才纠正模型的过度合列；OCR 跨列片段的拆分也核对实际字符框与原文索引，不改猜测出的数字。长边不足 1200 像素的小图在识别副本中有界放大，最多 4 倍、长边 1600，原图文件保持原样。插值帮助识别器采样，不能恢复拍摄时已缺失的文字细节。附近正文和旁注、最终几何回退中的单格标题及尾行，保留补充工作表。自由手写名单继续使用原有几何分列及人工校对，不把印刷表结构模型强套上去。结构正确、OCR 文本正确及 XLSX 可编辑是分别验证的三个指标。[结构模型适配](../app/src/main/java/com/scandesk/app/TableStructureOcr.java) · [固定来源与许可](../app/src/main/assets/licenses/slanet-plus.txt) · [ML Kit 输入建议](https://developers.google.com/ml-kit/vision/text-recognition/v2/android#input-image-guidelines)
+
+以下保留试验设计，用于继续补充多设备、独立文档与同页成对拍摄证据：
 
 1. **快门前提示纸边、晃动和遮挡文字的高光。** 在现有 CameraX 旁加低分辨率 YUV 帧分析，只保留最新帧，复用已经过回归的纸边候选。按旋转和预览裁切换算四角，连续几帧稳定再显示引导。保留手动快门。用白纸、覆膜页、白底表格和移动相机分别测边框抖动、误提示率、被漏掉的反光遮字和预览卡顿。在至少两种品牌、不同性能档位的真机上记录首次成片可用率与重拍次数。可沿用工程内的 CameraX 和 OpenCV 4.11，两者源码均采用 Apache-2.0，此路径无需新增模型权重。[CameraX 帧分析](https://developer.android.com/media/camera/camerax/analyze) · [预览坐标换算](https://developer.android.com/media/camera/camerax/transform-output) · [AndroidX 许可](https://github.com/androidx/androidx/blob/androidx-main/LICENSE.txt) · [OpenCV 许可](https://opencv.org/license/)
 2. **把书脊旁的字行真正拉平。** 在「扫书」中分左右页，比较现有四角结果与 UVDoc 的网格位移。预测小网格后映回原分辨率，由 OpenCV 重采样，并保留原稿和每一条 OCR 来源框的坐标映射。用同页平铺、轻卷、深书脊三种姿态测试，按文字基线最大偏移与行高之比、丢字行数、展平前后字符错误率以及峰值内存判定。平整原稿是回归对照。原作者代码为 MIT。Paddle 发布的 ONNX 权重标注 Apache-2.0，文件为 31,684,150 字节，模型 SHA-256 为 `54cab30dc2cf347b4f3d6971c833b1c3d84f5ef17280f1f6d15796bff20e63d6`。此处核对的是发布元数据，真机算子、延时和精度尚待实测。[作者论文与代码](https://github.com/tanguymagne/UVDoc) · [固定版本权重](https://huggingface.co/PaddlePaddle/UVDoc_onnx/tree/3bcf535371727d11e783101f79a504c68848aae3) · [OpenCV 坐标映射](https://docs.opencv.org/4.x/da/d54/group__imgproc__transform.html)

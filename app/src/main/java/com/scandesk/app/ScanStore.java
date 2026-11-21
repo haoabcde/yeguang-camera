@@ -10,6 +10,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -66,15 +67,10 @@ final class ScanStore {
             List<ScanDocument.Page> result = new ArrayList<>();
             for (int i = 0; i < pages.length(); i++) {
                 JSONObject entry = pages.getJSONObject(i);
-                String pageId = entry.getString("id");
-                if (!validId(pageId)) throw new JSONException("invalid page id");
-                JSONArray coordinates = entry.getJSONArray("crop");
-                float[] points = new float[8];
-                for (int j = 0; j < 8; j++) points[j] = (float) coordinates.getDouble(j);
-                CropQuad crop = CropQuad.from(points);
-                if (crop == null) throw new JSONException("invalid crop");
-                result.add(new ScanDocument.Page(pageId, entry.getInt("rotation") % 4, crop,
-                        ScanDocument.Filter.valueOf(entry.getString("filter"))));
+                ScanDocument.Page base = readPage(entry);
+                JSONObject before = entry.optJSONObject("beforeFlatten");
+                result.add(before == null ? base : new ScanDocument.Page(base.id, base.rotation,
+                        base.crop, base.filter, readPage(before)));
             }
             return new ScanDocument(id, json.getString("name"), json.getLong("modifiedAt"),
                     json.optLong("revision"), result,
@@ -83,6 +79,27 @@ final class ScanStore {
         } catch (JSONException | IllegalArgumentException failure) {
             throw new IOException("无法恢复扫描件", failure);
         }
+    }
+
+    private static ScanDocument.Page readPage(JSONObject entry) throws JSONException {
+        String pageId = entry.getString("id");
+        if (!validId(pageId)) throw new JSONException("invalid page id");
+        JSONArray coordinates = entry.getJSONArray("crop");
+        float[] points = new float[8];
+        for (int j = 0; j < 8; j++) points[j] = (float) coordinates.getDouble(j);
+        CropQuad crop = CropQuad.from(points);
+        if (crop == null) throw new JSONException("invalid crop");
+        return new ScanDocument.Page(pageId, entry.getInt("rotation") % 4, crop,
+                ScanDocument.Filter.valueOf(entry.getString("filter")));
+    }
+
+    private static JSONObject pageJson(ScanDocument.Page page) throws JSONException {
+        JSONArray coordinates = new JSONArray();
+        for (float value : page.crop.values()) coordinates.put(value);
+        JSONObject entry = new JSONObject().put("id", page.id).put("rotation", page.rotation)
+                .put("filter", page.filter.name()).put("crop", coordinates);
+        if (page.beforeFlatten != null) entry.put("beforeFlatten", pageJson(page.beforeFlatten));
+        return entry;
     }
 
     void save(ScanDocument document) throws IOException {
@@ -95,14 +112,7 @@ final class ScanStore {
             json.put("folder", document.folder.name());
             JSONArray pages = new JSONArray();
             for (ScanDocument.Page page : document.pages) {
-                JSONObject entry = new JSONObject();
-                entry.put("id", page.id);
-                entry.put("rotation", page.rotation);
-                entry.put("filter", page.filter.name());
-                JSONArray coordinates = new JSONArray();
-                for (float value : page.crop.values()) coordinates.put(value);
-                entry.put("crop", coordinates);
-                pages.put(entry);
+                pages.put(pageJson(page));
             }
             json.put("pages", pages);
             write(atomic(document.id, "document.json"), json);
@@ -112,7 +122,36 @@ final class ScanStore {
     }
 
     File image(ScanDocument document, ScanDocument.Page page) {
-        return new File(directory(document.id), page.id + ".image");
+        return new File(directory(document.id), page.id + (page.isFlattened() ? ".flat.image" : ".image"));
+    }
+
+    void writeFlattened(ScanDocument document, ScanDocument.Page page, File source, Runnable checkpoint)
+            throws IOException {
+        ensureDirectory(directory(document.id));
+        AtomicFile output = atomic(document.id, page.id + ".flat.image");
+        FileOutputStream stream = output.startWrite();
+        boolean complete = false;
+        try (FileInputStream input = new FileInputStream(source)) {
+            checkpoint.run();
+            byte[] buffer = new byte[32 * 1024];
+            int total = 0;
+            for (int size; (size = input.read(buffer)) != -1;) {
+                checkpoint.run();
+                total += size;
+                if (total > MAX_SOURCE_BYTES) throw new IOException("展平图片超过可保存范围");
+                stream.write(buffer, 0, size);
+            }
+            if (total == 0) throw new IOException("展平图片没有内容");
+            checkpoint.run();
+            output.finishWrite(stream);
+            complete = true;
+        } finally {
+            if (!complete) output.failWrite(stream);
+        }
+    }
+
+    void discardFlattened(ScanDocument document, ScanDocument.Page page) {
+        atomic(document.id, page.id + ".flat.image").delete();
     }
 
     void importImage(ContentResolver resolver, Uri uri, ScanDocument document, ScanDocument.Page page)
@@ -138,7 +177,8 @@ final class ScanStore {
     }
 
     void removeSource(ScanDocument document, ScanDocument.Page page) {
-        image(document, page).delete();
+        new File(directory(document.id), page.id + ".image").delete();
+        discardFlattened(document, page);
     }
 
     void delete(ScanDocument document) throws IOException {

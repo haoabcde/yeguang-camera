@@ -267,6 +267,7 @@ final class ScanImages {
         Mat mask = new Mat();
         Mat kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT,
                 new org.opencv.core.Size(5, 5));
+        List<Candidate> candidates = new ArrayList<>();
         try {
             Utils.bitmapToMat(source, rgba);
             Imgproc.cvtColor(rgba, gray, Imgproc.COLOR_RGBA2GRAY);
@@ -278,12 +279,24 @@ final class ScanImages {
 
             Imgproc.Canny(smooth, mask, 38, 110);
             Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE, kernel);
-            Candidate edges = candidate(mask, luminance);
+            candidates(mask, luminance, candidates);
 
             Imgproc.threshold(smooth, mask, 0, 255, Imgproc.THRESH_BINARY | Imgproc.THRESH_OTSU);
             Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE, kernel);
-            Candidate paper = candidate(mask, luminance);
-            Candidate best = edges == null || paper != null && paper.score > edges.score ? paper : edges;
+            candidates(mask, luminance, candidates);
+            Candidate best = null;
+            for (Candidate candidate : candidates) {
+                if (best == null || candidate.score > best.score) best = candidate;
+            }
+            if (best != null) {
+                // An outer sheet that cannot be represented safely is a reason to
+                // retain the full photograph, not to select a nested table/panel.
+                for (Candidate candidate : candidates) {
+                    if (!candidate.preservesContour && candidate.area >= best.area
+                            && contains(candidate.original, best.original)) return null;
+                }
+                if (!best.preservesContour) return null;
+            }
             if (best == null || hasPrintedMargin(best.crop, luminance, smooth.cols(), smooth.rows())) return null;
             return best.crop;
         } finally {
@@ -291,13 +304,12 @@ final class ScanImages {
         }
     }
 
-    private static Candidate candidate(Mat mask, byte[] luminance) {
+    private static void candidates(Mat mask, byte[] luminance, List<Candidate> candidates) {
         List<MatOfPoint> contours = new ArrayList<>();
         Mat hierarchy = new Mat();
         MatOfPoint2f boundary = new MatOfPoint2f();
         MatOfPoint2f polygon = new MatOfPoint2f();
         MatOfPoint hull = new MatOfPoint();
-        Candidate best = null;
         int width = mask.cols();
         int height = mask.rows();
         double total = (double) width * height;
@@ -328,15 +340,76 @@ final class ScanImages {
                     double separation = edgeContrast(crop, luminance, width, height);
                     if (separation < 6) break;
                     double score = polygonArea + Math.min(0.26, separation / 150);
-                    if (best == null || score > best.score) best = new Candidate(crop, score);
+                    CropQuad containing = containContour(crop, contour.toArray(), width, height);
+                    candidates.add(new Candidate(containing == null ? crop : containing, crop,
+                            area, score, containing != null));
                     break;
                 }
             }
-            return best;
         } finally {
             for (MatOfPoint contour : contours) contour.release();
             release(hierarchy, boundary, polygon, hull);
         }
+    }
+
+    /** A four-corner chord can slice off a curved sheet's outward-bowed margin.
+     * Enclose its actual contour in the candidate's page plane before cropping.
+     * If that enclosure leaves the photograph, abstain instead of clamping corners
+     * inward and silently losing the protruding paper/header again.
+     */
+    private static CropQuad containContour(CropQuad crop, Point[] contour, int width, int height) {
+        Matrix plane = new Matrix();
+        if (!plane.setPolyToPoly(crop.pixels(width, height), 0,
+                new float[]{0, 0, 1, 0, 1, 1, 0, 1}, 0, 4)) return null;
+        float[] outline = new float[contour.length * 2];
+        for (int i = 0; i < contour.length; i++) {
+            outline[2 * i] = (float) contour[i].x;
+            outline[2 * i + 1] = (float) contour[i].y;
+        }
+        plane.mapPoints(outline);
+        float left = 0, top = 0, right = 1, bottom = 1;
+        for (int i = 0; i < outline.length; i += 2) {
+            if (!Float.isFinite(outline[i]) || !Float.isFinite(outline[i + 1])) return null;
+            left = Math.min(left, outline[i]);
+            right = Math.max(right, outline[i]);
+            top = Math.min(top, outline[i + 1]);
+            bottom = Math.max(bottom, outline[i + 1]);
+        }
+        // Ignore one-pixel contour/antialias rounding around a genuinely straight
+        // sheet, preserving the existing precise four-corner behavior.
+        float tolerance = 2f / Math.min(width, height);
+        if (left >= -tolerance && top >= -tolerance
+                && right <= 1 + tolerance && bottom <= 1 + tolerance) return crop;
+        if (left < -.2f || top < -.2f || right > 1.2f || bottom > 1.2f) return null;
+        left -= tolerance;
+        top -= tolerance;
+        right += tolerance;
+        bottom += tolerance;
+        Matrix inverse = new Matrix();
+        if (!plane.invert(inverse)) return null;
+        float[] enclosure = {left, top, right, top, right, bottom, left, bottom};
+        inverse.mapPoints(enclosure);
+        for (int i = 0; i < enclosure.length; i += 2) {
+            enclosure[i] /= width;
+            enclosure[i + 1] /= height;
+        }
+        return CropQuad.from(enclosure);
+    }
+
+    private static boolean contains(CropQuad outer, CropQuad inner) {
+        int contained = 0;
+        for (int corner = 0; corner < 4; corner++) {
+            boolean inside = true;
+            for (int edge = 0; edge < 4; edge++) {
+                int next = (edge + 1) % 4;
+                double dx = outer.x(next) - outer.x(edge), dy = outer.y(next) - outer.y(edge);
+                double cross = dx * (inner.y(corner) - outer.y(edge))
+                        - dy * (inner.x(corner) - outer.x(edge));
+                if (cross < -.005 * Math.hypot(dx, dy)) { inside = false; break; }
+            }
+            if (inside) contained++;
+        }
+        return contained >= 3;
     }
 
     private static CropQuad ordered(Point[] points, int width, int height) {
@@ -671,11 +744,17 @@ final class ScanImages {
 
     private static final class Candidate {
         final CropQuad crop;
+        final CropQuad original;
+        final double area;
         final double score;
+        final boolean preservesContour;
 
-        Candidate(CropQuad crop, double score) {
+        Candidate(CropQuad crop, CropQuad original, double area, double score, boolean preservesContour) {
             this.crop = crop;
+            this.original = original;
+            this.area = area;
             this.score = score;
+            this.preservesContour = preservesContour;
         }
     }
 }

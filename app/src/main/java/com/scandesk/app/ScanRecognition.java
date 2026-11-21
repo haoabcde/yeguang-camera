@@ -180,14 +180,44 @@ final class ScanRecognition {
         }
 
         List<OfficeTable> tables(Bitmap bitmap, int page) throws IOException {
-            Bitmap aligned = null;
+            return tables(bitmap, page, true);
+        }
+
+        // The explicit native-size path is used by the local regression harness for paired comparisons.
+        List<OfficeTable> tables(Bitmap bitmap, int page, boolean enlargeSmall) throws IOException {
+            Bitmap working = bitmap;
             try {
-                aligned = TableVision.straighten(bitmap);
+                checkInterrupted();
+                Bitmap aligned = TableVision.straighten(working);
+                if (aligned != working) {
+                    working.recycle();
+                    working = aligned;
+                }
+                checkInterrupted();
+                Bitmap prepared = enlargeSmall ? tableInput(working) : working;
+                if (prepared != working) {
+                    working.recycle();
+                    working = prepared;
+                }
+                checkInterrupted();
+                Bitmap ready = working;
+                working = null; // read owns this bitmap, including asynchronous cancellation cleanup.
+                return read(ready, page, (image, text, ocr) -> TableVision.recognize(image, text, ocr, page));
             } finally {
-                if (aligned != bitmap) bitmap.recycle();
+                if (working != null) working.recycle();
             }
-            return read(aligned, page, (image, text, ocr) ->
-                    TableVision.recognize(image, text, ocr, page));
+        }
+
+        static Bitmap tableInput(Bitmap source) throws IOException {
+            checkInterrupted();
+            int edge = Math.max(source.getWidth(), source.getHeight());
+            if (edge >= 1200) return source;
+            // ML Kit recommends sufficient pixels per character. Interpolation can help its input
+            // sampling; it cannot reconstruct detail absent from the captured image.
+            // https://developers.google.com/ml-kit/vision/text-recognition/v2/android#input-image-guidelines
+            float scale = Math.min(4f, 1600f / edge);
+            return Bitmap.createScaledBitmap(source, Math.max(1, Math.round(source.getWidth() * scale)),
+                    Math.max(1, Math.round(source.getHeight() * scale)), true);
         }
 
         private <T> T read(Bitmap bitmap, int page, PageReader<T> consumer) throws IOException {

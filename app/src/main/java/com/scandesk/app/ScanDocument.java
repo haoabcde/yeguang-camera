@@ -102,24 +102,41 @@ final class ScanDocument {
         final int rotation;
         final CropQuad crop;
         final Filter filter;
+        final Page beforeFlatten;
 
         Page(String id, int rotation, CropQuad crop, Filter filter) {
+            this(id, rotation, crop, filter, null);
+        }
+
+        Page(String id, int rotation, CropQuad crop, Filter filter, Page beforeFlatten) {
             this.id = id;
             this.rotation = rotation;
             this.crop = crop;
             this.filter = filter;
+            if (beforeFlatten != null && (!id.equals(beforeFlatten.id) || beforeFlatten.beforeFlatten != null)) {
+                throw new IllegalArgumentException("书页原稿状态无效");
+            }
+            this.beforeFlatten = beforeFlatten;
         }
 
         Page rotate() {
-            return new Page(id, (rotation + 1) % 4, crop.clockwise(), filter);
+            return new Page(id, (rotation + 1) % 4, crop.clockwise(), filter, beforeFlatten);
         }
 
         Page crop(CropQuad crop) {
-            return new Page(id, rotation, crop, filter);
+            return new Page(id, rotation, crop, filter, beforeFlatten);
         }
 
         Page filter(Filter filter) {
-            return new Page(id, rotation, crop, filter);
+            return new Page(id, rotation, crop, filter, beforeFlatten);
         }
+
+        boolean isFlattened() { return beforeFlatten != null; }
+
+        Page flattened() {
+            return new Page(id, 0, CropQuad.FULL, filter, isFlattened() ? beforeFlatten : this);
+        }
+
+        Page restoreFlattening() { return isFlattened() ? beforeFlatten : this; }
     }
 }

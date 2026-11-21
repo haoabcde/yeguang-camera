@@ -77,7 +77,7 @@ public final class MainActivity extends ComponentActivity {
     private enum PdfTool { OPEN, ADD, MERGE, PAGES, SAVE, SPLIT, TEXT, WORD, EXCEL, PNG, IMAGES, LONG,
         COMPRESS, WATERMARK, SIGN }
     private enum ImageTool { EDIT, CROP, ENHANCE, SCREEN, WORD, HANDWRITING, TABLE, HAND_TABLE, QR, RESIZE, PASSPORT, LONG,
-        WATERMARK, SIGN, LINE, ID, BOOK, REPAIR }
+        WATERMARK, SIGN, LINE, ID, BOOK, FLATTEN, REPAIR }
 
     private final ExecutorService work = Executors.newSingleThreadExecutor();
     private final ExecutorService previews = Executors.newSingleThreadExecutor();
@@ -126,6 +126,7 @@ public final class MainActivity extends ComponentActivity {
     private int wordPage;
     private int tableIndex;
     private boolean wordDirty;
+    private AlertDialog bookPreviewDialog;
     private String pendingFile;
     private String pendingName;
     private FileFormat pendingFormat;
@@ -270,8 +271,9 @@ public final class MainActivity extends ComponentActivity {
 
     @Override protected void onDestroy() {
         main.removeCallbacks(saveWord);
+        if (bookPreviewDialog != null) bookPreviewDialog.dismiss();
         if (job != null) {
-            job.cancelled.set(true);
+            job.cancel();
             job.dialog.dismiss();
         }
         work.shutdown();
@@ -591,6 +593,7 @@ public final class MainActivity extends ComponentActivity {
                 imageTile("提取表格", R.drawable.ic_table, ImageTool.TABLE),
                 imageTile("手写转 Excel", R.drawable.ic_table, ImageTool.HAND_TABLE),
                 imageTile("书页拆分", R.drawable.ic_crop, ImageTool.BOOK),
+                imageTile("书页展平", R.drawable.ic_document, ImageTool.FLATTEN),
                 imageTile("拍屏去彩纹", R.drawable.ic_camera, ImageTool.SCREEN),
                 imageTile("读二维码", R.drawable.ic_qr, ImageTool.QR));
         shelf.section("PDF", "PDF 工具",
@@ -607,6 +610,7 @@ public final class MainActivity extends ComponentActivity {
                 pdfTile("PDF 手写签名", R.drawable.ic_edit, PdfTool.SIGN));
         shelf.section("图文", "图文编辑",
                 imageTile("图像矫正", R.drawable.ic_crop, ImageTool.CROP),
+                imageTile("书页展平", R.drawable.ic_document, ImageTool.FLATTEN),
                 imageTile("文档增强", R.drawable.ic_enhance, ImageTool.ENHANCE),
                 imageTile("等比改尺寸", R.drawable.ic_image, ImageTool.RESIZE),
                 imageTile("证件照裁切", R.drawable.ic_camera, ImageTool.PASSPORT),
@@ -1111,7 +1115,7 @@ public final class MainActivity extends ComponentActivity {
         ImageTool action = nextImageTool;
         ScanDocument.Filter initialFilter = switch (action) {
             case SCREEN -> ScanDocument.Filter.SCREEN;
-            case EDIT, ENHANCE, WORD, TABLE, CROP, BOOK -> ScanDocument.Filter.AUTO;
+            case EDIT, ENHANCE, WORD, TABLE, CROP, BOOK, FLATTEN -> ScanDocument.Filter.AUTO;
             default -> ScanDocument.Filter.ORIGINAL;
         };
         nextImageTool = ImageTool.EDIT;
@@ -1759,6 +1763,9 @@ public final class MainActivity extends ComponentActivity {
             case BOOK:
                 splitBook();
                 break;
+            case FLATTEN:
+                flattenBookPage();
+                break;
             case REPAIR:
                 repairImage();
                 break;
@@ -1771,6 +1778,8 @@ public final class MainActivity extends ComponentActivity {
         if (currentPage() == null || !saveCrop(true)) return;
         ScanSheet sheet = new ScanSheet(this, ui, "图片工具");
         sheet.option(R.drawable.ic_image, "等比改尺寸", null, false, () -> runImageTool(ImageTool.RESIZE));
+        sheet.option(R.drawable.ic_document, currentPage().isFlattened() ? "恢复展平前" : "书页展平",
+                null, false, () -> runImageTool(ImageTool.FLATTEN));
         sheet.option(R.drawable.ic_gallery, "合并长图", null, false, () -> runImageTool(ImageTool.LONG));
         sheet.option(R.drawable.ic_edit, "添加水印", null, false, () -> runImageTool(ImageTool.WATERMARK));
         sheet.option(R.drawable.ic_edit, "手写签名", null, false, () -> runImageTool(ImageTool.SIGN));
@@ -1781,6 +1790,149 @@ public final class MainActivity extends ComponentActivity {
 
     private interface BitmapEdit {
         Bitmap apply(Bitmap bitmap) throws IOException;
+    }
+
+    private void flattenBookPage() {
+        ScanDocument current = document;
+        ScanDocument.Page page = currentPage();
+        if (page.isFlattened()) {
+            new AlertDialog.Builder(this).setTitle("恢复展平前？")
+                    .setMessage("将恢复原稿及展平前的裁切、方向和画质设置。")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("恢复原稿", (d, which) -> restoreBookPage(current, page)).show();
+            return;
+        }
+        task("展平当前书页", true, state -> {
+            Bitmap source = ScanImages.render(store.image(current, page),
+                    page.filter(ScanDocument.Filter.ORIGINAL), 3000);
+            Bitmap output = null, before = null, after = null;
+            File temporary = null;
+            boolean transferred = false;
+            try (BookDewarp reader = new BookDewarp(getAssets())) {
+                BookDewarp.Result result = reader.flatten(source, state::check);
+                output = result.image;
+                state.check();
+                if (!result.changed()) return new BookFlatteningPreview(null, null, null);
+                temporary = File.createTempFile("book-flat-", ".png", getCacheDir());
+                try (OutputStream stream = new BufferedOutputStream(new FileOutputStream(temporary))) {
+                    if (!output.compress(Bitmap.CompressFormat.PNG, 100, stream)) throw new IOException("无法生成展平书页");
+                }
+                state.check();
+                before = BookFlatteningPreview.thumbnail(source);
+                after = BookFlatteningPreview.thumbnail(output);
+                state.check();
+                BookFlatteningPreview preview = new BookFlatteningPreview(before, after, temporary);
+                transferred = true;
+                return preview;
+            } finally {
+                if (output != null && output != source) output.recycle();
+                source.recycle();
+                if (!transferred) {
+                    if (before != null) before.recycle();
+                    if (after != null) after.recycle();
+                    if (temporary != null) temporary.delete();
+                }
+            }
+        }, preview -> {
+            if (!preview.changed()) {
+                preview.close();
+                toast("展平结果与原稿接近，已保留原稿");
+                return;
+            }
+            showBookPreview(current, page, preview);
+        }, this::flattenBookPage);
+    }
+
+    private void showBookPreview(ScanDocument current, ScanDocument.Page page, BookFlatteningPreview result) {
+        ScanPreview preview = new ScanPreview(this, ui);
+        LinearLayout panel = new LinearLayout(this) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                super.onMeasure(widthSpec, heightSpec);
+                if (MeasureSpec.getMode(heightSpec) == MeasureSpec.UNSPECIFIED) return;
+                int other = getPaddingTop() + getPaddingBottom();
+                for (int i = 0; i < getChildCount(); i++) {
+                    View child = getChildAt(i);
+                    if (child != preview) other += child.getMeasuredHeight();
+                }
+                // AlertDialog allocates its custom panel after title and action buttons.
+                // Recompute on each layout so a portrait preview also fits a short landscape window.
+                int available = Math.max(1, MeasureSpec.getSize(heightSpec) - other);
+                preview.getLayoutParams().height = Math.min(ui.dp(430), available);
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
+        panel.setOrientation(LinearLayout.VERTICAL);
+        TextView label = ui.text("检查页边和字行，确认后应用", 14, ScanUi.SECONDARY);
+        label.setPadding(0, 0, 0, ui.dp(10));
+        panel.addView(label);
+        panel.addView(preview, new LinearLayout.LayoutParams(ui.match(), ui.dp(430)));
+        LinearLayout modes = ui.horizontal();
+        Button before = ui.quietButton("展平前", ScanUi.INK, () -> {});
+        Button after = ui.quietButton("展平后", ScanUi.ACCENT, () -> {});
+        java.util.function.Consumer<Boolean> compare = showBefore -> {
+            preview.show(showBefore ? result.before : result.after, null, null, true);
+            before.setSelected(showBefore);
+            after.setSelected(!showBefore);
+            before.setTextColor(showBefore ? ScanUi.ACCENT : ScanUi.INK);
+            after.setTextColor(showBefore ? ScanUi.INK : ScanUi.ACCENT);
+        };
+        before.setOnClickListener(v -> compare.accept(true));
+        after.setOnClickListener(v -> compare.accept(false));
+        after.setSelected(true);
+        modes.addView(before, new LinearLayout.LayoutParams(0, ui.dp(48), 1));
+        modes.addView(after, new LinearLayout.LayoutParams(0, ui.dp(48), 1));
+        panel.addView(modes, new LinearLayout.LayoutParams(ui.match(), ui.dp(48)));
+        preview.show(result.after, null, null);
+        preview.setContentDescription("书页展平对比预览，可缩放");
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("书页展平")
+                .setView(inset(panel)).setNegativeButton("取消", null).setPositiveButton("应用展平", null).create();
+        bookPreviewDialog = dialog;
+        dialog.setOnDismissListener(d -> {
+            preview.show(null, null, null);
+            result.close();
+            if (bookPreviewDialog == dialog) bookPreviewDialog = null;
+        });
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v ->
+                task("保存展平书页", false, state -> {
+                    store.writeFlattened(current, page, result.flattened, state::check);
+                    state.check();
+                    List<ScanDocument.Page> pages = new ArrayList<>(current.pages);
+                    pages.set(current.pages.indexOf(page), page.flattened());
+                    ScanDocument updated = current.withPages(pages);
+                    store.save(updated);
+                    return updated;
+                }, updated -> {
+                    document = updated;
+                    cropping = false;
+                    pendingCrop = null;
+                    remember();
+                    images.evictAll();
+                    contentGeneration++;
+                    dialog.dismiss();
+                    render();
+                    toast("已应用展平，原稿已保留");
+                }, null)));
+        dialog.show();
+    }
+
+    private void restoreBookPage(ScanDocument current, ScanDocument.Page page) {
+        task("恢复书页原稿", false, state -> {
+            List<ScanDocument.Page> pages = new ArrayList<>(current.pages);
+            pages.set(current.pages.indexOf(page), page.restoreFlattening());
+            ScanDocument updated = current.withPages(pages);
+            store.save(updated);
+            store.discardFlattened(current, page);
+            return updated;
+        }, updated -> {
+            document = updated;
+            cropping = false;
+            pendingCrop = null;
+            remember();
+            images.evictAll();
+            contentGeneration++;
+            render();
+            toast("已恢复展平前的原稿");
+        }, null);
     }
 
     private void editImage(String suffix, BitmapEdit edit) {
@@ -2886,11 +3038,18 @@ public final class MainActivity extends ComponentActivity {
         JobState state = new JobState(title, cancel);
         job = state;
         work.execute(() -> {
+            state.worker = Thread.currentThread();
             try {
                 state.check();
                 T result = operation.run(state);
                 main.post(() -> {
-                    if (complete(state)) success.show(result);
+                    if (!complete(state)) discardResult(result);
+                    else if (state.cancelled.get() && (result instanceof AutoCloseable
+                            || result instanceof ScanRecognition.WordDraft
+                            || result instanceof ScanRecognition.TableDraft)) {
+                        discardResult(result);
+                        toast("已取消");
+                    } else success.show(result);
                 });
             } catch (CancellationException cancelled) {
                 main.post(() -> {
@@ -2898,15 +3057,27 @@ public final class MainActivity extends ComponentActivity {
                 });
             } catch (Exception failure) {
                 main.post(() -> {
-                    if (complete(state)) error(message(title, failure), retry);
+                    if (complete(state)) {
+                        if (state.cancelled.get()) toast("已取消");
+                        else error(message(title, failure), retry);
+                    }
                 });
             } catch (OutOfMemoryError memory) {
                 images.evictAll();
                 main.post(() -> {
                     if (complete(state)) error("内存空间不足，请减少单次处理页数后重试", retry);
                 });
+            } finally {
+                state.worker = null;
             }
         });
+    }
+
+    private static void discardResult(Object result) {
+        if (result instanceof AutoCloseable) {
+            try { ((AutoCloseable) result).close(); }
+            catch (Exception ignored) { /* Only release abandoned preview resources. */ }
+        }
     }
 
     private boolean complete(JobState state) {
@@ -2925,6 +3096,7 @@ public final class MainActivity extends ComponentActivity {
 
     private final class JobState {
         final AtomicBoolean cancelled = new AtomicBoolean();
+        volatile Thread worker;
         final AlertDialog dialog;
         final ProgressBar indicator;
         final TextView position;
@@ -2947,10 +3119,16 @@ public final class MainActivity extends ComponentActivity {
             dialog = builder.create();
             dialog.show();
             if (cancel) dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(button -> {
-                cancelled.set(true);
+                cancel();
                 position.setText("正在取消…");
                 button.setEnabled(false);
             });
+        }
+
+        void cancel() {
+            cancelled.set(true);
+            Thread running = worker;
+            if (running != null) running.interrupt();
         }
 
         void check() {

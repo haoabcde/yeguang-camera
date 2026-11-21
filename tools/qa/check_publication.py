@@ -14,6 +14,8 @@ REVIEWED_BINARY = {
     "app/src/main/assets/ocr/ppocrv5-mobile-det.onnx": "a431985659dc921974177a95adcfbb90fd9e51989a5e04d70d0b75f597b6e61d",
     "app/src/main/assets/ocr/ppocrv5-mobile-rec.onnx": "da72dc72ca4dc220df0dfde68c1dedc31c58d3e76a25871122e5056227d50092",
     "app/src/main/assets/ocr/ppocrv5-server-rec.onnx": "d9dc333c9c7b042c6dffb8e33d72b6f65c9c1d463d0a3c2f78174fea55e94752",
+    "app/src/main/assets/vision/uvdoc.onnx": "ac224193ca850105b08a8ac249b4e088200d283265169a7f87338d056eb4f569",
+    "app/src/main/assets/vision/slanet-plus.onnx": "7790c0c13ce064782c9d22ebeb16b4da8216f83d3ba576da962c106ef58386da",
     "app/src/androidTest/assets/flat-ledger.png": "cbaafd1ca0665bb6b7bc40fbbba20368f1d03b3bba8e17fc8ce56368d9a02eff",
     "app/src/androidTest/assets/printed-table.jpg": "77c587da555fd2dd01f308cb49b3dd6ebcd98a04fe64259b3e8b6201dd99b0b6",
     "app/src/main/res/drawable-nodpi/yeguang_launcher_art.png": "539c2bf227c6ed00569a8b585573bacd384fc68ca2898991f7348bb6c8a1745f",

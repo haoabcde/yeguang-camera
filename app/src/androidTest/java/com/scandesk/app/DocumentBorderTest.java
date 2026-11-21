@@ -9,6 +9,7 @@ import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -83,6 +84,63 @@ public final class DocumentBorderTest {
             }
         } finally {
             page.recycle();
+        }
+    }
+
+    @Test public void curvedOuterPaperKeepsItsHeaderAndDoesNotFallBackToAnInnerGrid() throws Exception {
+        for (int topOffset : new int[]{0, -90}) {
+            Bitmap photo = Bitmap.createBitmap(800, 1000, Bitmap.Config.ARGB_8888);
+            try {
+                Canvas canvas = new Canvas(photo);
+                canvas.drawColor(0xff625245);
+                Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                paint.setColor(0xfff3e7cf);
+                Path paper = new Path();
+                paper.moveTo(80, 150 + topOffset);
+                paper.quadTo(400, 30 + topOffset, 720, 150 + topOffset);
+                paper.lineTo(750, 920 + topOffset);
+                paper.lineTo(50, 900 + topOffset);
+                paper.close();
+                canvas.drawPath(paper, paint);
+                paint.setColor(0xff272727);
+                paint.setTextSize(26);
+                canvas.drawText("CURVED PAPER", 230, 130 + topOffset, paint);
+                canvas.drawText("27", 585, 145 + topOffset, paint);
+                paint.setStrokeWidth(3);
+                for (int x = 135; x <= 665; x += 106) {
+                    canvas.drawLine(x, 250 + topOffset, x, 820 + topOffset, paint);
+                }
+                for (int y = 250; y <= 820; y += 57) {
+                    canvas.drawLine(135, y + topOffset, 665, y + topOffset, paint);
+                }
+                canvas.setBitmap(null);
+                for (int height : new int[]{1000, 720}) {
+                    Bitmap probe = Bitmap.createScaledBitmap(photo, height * 4 / 5, height, true);
+                    try {
+                        CropQuad found = ScanImages.detect(probe);
+                        // Abstention keeps the photograph. A proposal must enclose
+                        // the bowed top and short header, not a straight chord or
+                        // the stronger inner table outline.
+                        if (found != null) {
+                            assertInside(found, 400 / 800f, (90 + topOffset) / 1000f, height);
+                            assertInside(found, 230 / 800f, (110 + topOffset) / 1000f, height);
+                            assertInside(found, 615 / 800f, (145 + topOffset) / 1000f, height);
+                            assertInside(found, 50 / 800f, (900 + topOffset) / 1000f, height);
+                            assertInside(found, 750 / 800f, (920 + topOffset) / 1000f, height);
+                        }
+                    } finally { if (probe != photo) probe.recycle(); }
+                }
+            } finally { photo.recycle(); }
+        }
+    }
+
+    private static void assertInside(CropQuad crop, float x, float y, int height) {
+        for (int edge = 0; edge < 4; edge++) {
+            int next = (edge + 1) % 4;
+            double dx = crop.x(next) - crop.x(edge), dy = crop.y(next) - crop.y(edge);
+            double cross = dx * (y - crop.y(edge)) - dy * (x - crop.x(edge));
+            assertTrue("automatic crop cuts curved paper at " + x + "," + y + " height=" + height,
+                    cross >= -.006 * Math.hypot(dx, dy));
         }
     }
 

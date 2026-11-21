@@ -8,6 +8,8 @@ import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Canvas;
+import android.graphics.Bitmap;
+import android.graphics.Matrix;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
@@ -18,6 +20,7 @@ import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -43,6 +46,8 @@ import androidx.camera.core.CameraSelector;
 import androidx.camera.core.FocusMeteringAction;
 import androidx.camera.core.ImageCapture;
 import androidx.camera.core.ImageCaptureException;
+import androidx.camera.core.ImageAnalysis;
+import androidx.camera.core.ImageProxy;
 import androidx.camera.core.MeteringPoint;
 import androidx.camera.core.Preview;
 import androidx.camera.core.ResolutionInfo;
@@ -50,6 +55,11 @@ import androidx.camera.core.UseCaseGroup;
 import androidx.camera.core.ViewPort;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
+import androidx.camera.view.TransformExperimental;
+import androidx.camera.view.transform.CoordinateTransform;
+import androidx.camera.view.transform.ImageProxyTransformFactory;
+import androidx.camera.view.transform.OutputTransform;
+import androidx.annotation.OptIn;
 import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -64,7 +74,10 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
+@OptIn(markerClass = TransformExperimental.class)
 public final class CaptureActivity extends ComponentActivity {
     static final String EXTRA_LIMIT = "limit";
     static final String EXTRA_MULTIPLE = "multiple";
@@ -91,7 +104,7 @@ public final class CaptureActivity extends ComponentActivity {
     private boolean permissionAsked;
     private boolean connecting;
     private boolean stateSaved;
-    private boolean foreground;
+    private volatile boolean foreground;
     private boolean transferred;
     private CaptureReview review;
     private AlertDialog qualityDialog;
@@ -103,6 +116,22 @@ public final class CaptureActivity extends ComponentActivity {
     private ActivityResultLauncher<String> permission;
     private PreviewView finder;
     private Grid grid;
+    private ImageAnalysis imageAnalysis;
+    private final ExecutorService analysisExecutor = Executors.newSingleThreadExecutor();
+    private final CaptureGuidance guidance = new CaptureGuidance();
+    private final ImageProxyTransformFactory analysisTransform = new ImageProxyTransformFactory();
+    private CaptureGuidanceOverlay guidanceOutline;
+    private TextView guidanceMessage;
+    private Button guidanceToggle;
+    private volatile boolean guidanceEnabled = true;
+    private volatile int guidanceGeneration;
+    private boolean guidanceUnavailable;
+    private long lastAnalysis;
+    private final Runnable guidanceExpired = () -> {
+        if (guidanceOutline != null) guidanceOutline.show(null, false);
+        if (guidanceMessage != null && foreground && guidanceEnabled && streaming)
+            guidanceMessage.setText("正在更新画面，请稍候");
+    };
     private float focusX = Float.NaN;
     private float focusY = Float.NaN;
     private LinearLayout status;
@@ -125,6 +154,10 @@ public final class CaptureActivity extends ComponentActivity {
         limit = Math.max(0, Math.min(ScanStore.PAGE_LIMIT,
                 getIntent().getIntExtra(EXTRA_LIMIT, ScanStore.PAGE_LIMIT)));
         multiple = limit > 1 && getIntent().getBooleanExtra(EXTRA_MULTIPLE, false);
+        guidanceEnabled = getSharedPreferences("camera", MODE_PRIVATE).getBoolean("guidance", true);
+        // Detection uses the original Y-buffer axes; PreviewView supplies rotation and mirroring.
+        analysisTransform.setUsingCropRect(false);
+        analysisTransform.setUsingRotationDegrees(false);
         if (saved != null) {
             restore(saved);
             String shot = saved.getString("reviewPhoto");
@@ -158,7 +191,10 @@ public final class CaptureActivity extends ComponentActivity {
             showStatus("此设备没有可用的相机", null, null);
         } else if (hasCameraPermission()) {
             if (imageCapture == null) connectCamera();
-            else onPreviewState(finder.getPreviewStreamState().getValue());
+            else {
+                startGuidance();
+                onPreviewState(finder.getPreviewStreamState().getValue());
+            }
         } else if (!permissionAsked) {
             requestPermission();
         } else {
@@ -169,6 +205,7 @@ public final class CaptureActivity extends ComponentActivity {
 
     @Override protected void onPause() {
         foreground = false;
+        stopGuidance();
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         finder.removeCallbacks(previewTimeout);
         super.onPause();
@@ -184,6 +221,10 @@ public final class CaptureActivity extends ComponentActivity {
     }
 
     @Override protected void onDestroy() {
+        stopGuidance();
+        // Drain already delivered analyzer callbacks so their finally blocks close ImageProxy.
+        // Old generations return immediately and cannot update a destroyed Activity.
+        analysisExecutor.shutdown();
         finder.removeCallbacks(previewTimeout);
         if (qualityDialog != null) qualityDialog.dismiss();
         if (discardDialog != null) {
@@ -289,7 +330,21 @@ public final class CaptureActivity extends ComponentActivity {
         multiMode = ui.button("多页", false, () -> setMode(true));
         modes.addView(singleMode, new LinearLayout.LayoutParams(ui.dp(86), ui.wrap()));
         modes.addView(multiMode, new LinearLayout.LayoutParams(ui.dp(86), ui.wrap()));
-        outer.addView(modes, new FrameLayout.LayoutParams(ui.wrap(), ui.wrap(), Gravity.CENTER));
+        guidanceToggle = ui.quietButton("引导", CAMERA_SECONDARY, this::toggleGuidance);
+        guidanceToggle.setTextSize(13);
+        guidanceToggle.setPadding(ui.dp(8), ui.dp(6), ui.dp(8), ui.dp(6));
+        if (getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE
+                || getResources().getConfiguration().screenWidthDp < 340) {
+            LinearLayout stacked = ui.vertical();
+            stacked.setGravity(Gravity.CENTER_HORIZONTAL);
+            stacked.addView(modes);
+            stacked.addView(guidanceToggle);
+            outer.addView(stacked, new FrameLayout.LayoutParams(ui.wrap(), ui.wrap(), Gravity.CENTER));
+        } else {
+            outer.addView(modes, new FrameLayout.LayoutParams(ui.wrap(), ui.wrap(), Gravity.START | Gravity.CENTER_VERTICAL));
+            outer.addView(guidanceToggle, new FrameLayout.LayoutParams(ui.wrap(), ui.wrap(), Gravity.END | Gravity.CENTER_VERTICAL));
+        }
+        updateGuidanceToggle();
         return outer;
     }
 
@@ -304,6 +359,18 @@ public final class CaptureActivity extends ComponentActivity {
         grid = new Grid();
         grid.setVisibility(View.GONE);
         frame.addView(grid, new FrameLayout.LayoutParams(ui.match(), ui.match()));
+        guidanceOutline = new CaptureGuidanceOverlay(this);
+        frame.addView(guidanceOutline, new FrameLayout.LayoutParams(ui.match(), ui.match()));
+        guidanceMessage = ui.text("", 13, ScanUi.PAPER);
+        guidanceMessage.setGravity(Gravity.CENTER);
+        guidanceMessage.setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8));
+        guidanceMessage.setBackground(ui.panel(0xb322211e, 8, 0));
+        guidanceMessage.setMaxLines(2);
+        guidanceMessage.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        FrameLayout.LayoutParams hint = new FrameLayout.LayoutParams(ui.wrap(), ui.wrap(), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        hint.setMargins(ui.dp(16), ui.dp(8), ui.dp(16), ui.dp(14));
+        frame.addView(guidanceMessage, hint);
+        guidanceMessage.setVisibility(View.GONE);
         configureFocus();
 
         status = ui.vertical();
@@ -461,7 +528,9 @@ public final class CaptureActivity extends ComponentActivity {
                 ? "正在保存照片" : "正在检查照片");
         else if (!files.isEmpty()) reviewText.setText("已拍 " + files.size() + " 页");
         else if (limit == 0) reviewText.setText("扫描件页数已满");
-        else reviewText.setText(streaming ? "让纸张四角留在取景区内" : "");
+        else reviewText.setText(streaming && (!guidanceEnabled || guidanceUnavailable)
+                ? "让纸张四角留在取景区内" : "");
+        updateGuidanceVisibility();
     }
 
     private void applyMode(Button button, boolean selected, boolean enabled) {
@@ -538,24 +607,135 @@ public final class CaptureActivity extends ComponentActivity {
         ImageCapture capture = new ImageCapture.Builder().setTargetRotation(rotation)
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).setJpegQuality(94).build();
         preview.setSurfaceProvider(finder.getSurfaceProvider());
-        camera = available.bindToLifecycle(this, selector, new UseCaseGroup.Builder().setViewPort(viewport)
-                .addUseCase(preview).addUseCase(capture).build());
+        ImageAnalysis analysis = new ImageAnalysis.Builder().setTargetRotation(rotation)
+                .setTargetResolution(new android.util.Size(640, 480))
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build();
+        guidanceUnavailable = false;
+        try {
+            camera = available.bindToLifecycle(this, selector, new UseCaseGroup.Builder().setViewPort(viewport)
+                    .addUseCase(preview).addUseCase(capture).addUseCase(analysis).build());
+            imageAnalysis = analysis;
+        } catch (IllegalArgumentException unsupportedCombination) {
+            analysis.clearAnalyzer();
+            available.unbind(preview, capture, analysis);
+            camera = available.bindToLifecycle(this, selector, new UseCaseGroup.Builder().setViewPort(viewport)
+                    .addUseCase(preview).addUseCase(capture).build());
+            imageAnalysis = null;
+            guidanceUnavailable = true;
+        }
         provider = available;
         cameraPreview = preview;
         imageCapture = capture;
+        startGuidance();
         onPreviewState(finder.getPreviewStreamState().getValue());
     }
 
     private void retryCamera() {
         if (connecting) return;
-        if (provider != null && imageCapture != null) provider.unbind(cameraPreview, imageCapture);
+        stopGuidance();
+        if (provider != null && imageCapture != null) {
+            if (imageAnalysis != null) provider.unbind(cameraPreview, imageCapture, imageAnalysis);
+            else provider.unbind(cameraPreview, imageCapture);
+        }
         provider = null;
         camera = null;
         cameraPreview = null;
         imageCapture = null;
+        imageAnalysis = null;
         streaming = false;
         connectCamera();
         updateControls();
+    }
+
+    private void toggleGuidance() {
+        guidanceEnabled = !guidanceEnabled;
+        getSharedPreferences("camera", MODE_PRIVATE).edit().putBoolean("guidance", guidanceEnabled).apply();
+        if (guidanceEnabled) startGuidance(); else stopGuidance();
+        updateGuidanceToggle();
+        updateControls();
+    }
+
+    private void updateGuidanceToggle() {
+        if (guidanceToggle == null) return;
+        guidanceToggle.setSelected(guidanceEnabled);
+        guidanceToggle.setText(guidanceEnabled ? "引导 开" : "引导 关");
+        guidanceToggle.setContentDescription(guidanceEnabled ? "关闭拍前引导" : "开启拍前引导");
+        guidanceToggle.setTextColor(guidanceEnabled ? ScanUi.PAPER : CAMERA_SECONDARY);
+    }
+
+    private void updateGuidanceVisibility() {
+        if (guidanceMessage == null) return;
+        boolean visible = foreground && streaming && guidanceEnabled && review.file == null;
+        guidanceOutline.setVisibility(visible ? View.VISIBLE : View.GONE);
+        guidanceMessage.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (!visible) guidanceOutline.show(null, false);
+        else if (guidanceUnavailable) guidanceMessage.setText("此相机暂不支持实时引导，可手动拍摄");
+        else if (guidanceMessage.length() == 0) guidanceMessage.setText("让纸张四角留在画面内");
+    }
+
+    private void startGuidance() {
+        if (imageAnalysis == null || !guidanceEnabled || !foreground || analysisExecutor.isShutdown()) return;
+        finder.removeCallbacks(guidanceExpired);
+        guidanceOutline.show(null, false);
+        guidanceMessage.setText(CaptureGuidance.Issue.SEARCHING.message);
+        int generation = ++guidanceGeneration;
+        analysisExecutor.execute(() -> { guidance.reset(); lastAnalysis = 0; });
+        imageAnalysis.setAnalyzer(analysisExecutor, proxy -> analyzePreview(proxy, generation));
+    }
+
+    private void stopGuidance() {
+        guidanceGeneration++;
+        if (finder != null) finder.removeCallbacks(guidanceExpired);
+        if (imageAnalysis != null) imageAnalysis.clearAnalyzer();
+        if (guidanceOutline != null) guidanceOutline.show(null, false);
+        if (guidanceMessage != null) {
+            guidanceMessage.setText("");
+            guidanceMessage.setVisibility(View.GONE);
+        }
+    }
+
+    private void analyzePreview(ImageProxy proxy, int generation) {
+        Bitmap frame = null;
+        try {
+            long now = SystemClock.elapsedRealtime();
+            if (generation != guidanceGeneration || !guidanceEnabled || !foreground
+                    || now - lastAnalysis < 350 || Thread.currentThread().isInterrupted()) return;
+            lastAnalysis = now;
+            ImageProxy.PlaneProxy y = proxy.getPlanes()[0];
+            Rect crop = new Rect(proxy.getCropRect());
+            frame = CaptureGuidance.lumaFrame(y.getBuffer(), proxy.getWidth(), proxy.getHeight(),
+                    y.getRowStride(), y.getPixelStride(), crop, 640);
+            CaptureGuidance.Result result = guidance.analyze(frame, now);
+            OutputTransform source = analysisTransform.getOutputTransform(proxy);
+            finder.post(() -> {
+                if (generation != guidanceGeneration || !guidanceEnabled || !foreground || isDestroyed()
+                        || SystemClock.elapsedRealtime() - now > 1500) return;
+                OutputTransform target = finder.getOutputTransform();
+                if (target == null) return;
+                try {
+                    Matrix mapping = new Matrix();
+                    new CoordinateTransform(source, target).transform(mapping);
+                    float[] points = CaptureGuidance.previewPoints(result.paper, crop, mapping);
+                    guidanceOutline.show(points, result.issue == CaptureGuidance.Issue.READY);
+                    if (!result.issue.message.contentEquals(guidanceMessage.getText()))
+                        guidanceMessage.setText(result.issue.message);
+                    finder.removeCallbacks(guidanceExpired);
+                    finder.postDelayed(guidanceExpired, 1500);
+                    updateGuidanceVisibility();
+                } catch (IllegalArgumentException | IllegalStateException staleTransform) {
+                    guidanceOutline.show(null, false);
+                }
+            });
+        } catch (IOException | RuntimeException unavailable) {
+            finder.post(() -> {
+                if (generation != guidanceGeneration || isDestroyed()) return;
+                guidanceOutline.show(null, false);
+                guidanceMessage.setText("对照取景画面，保留纸张四角");
+            });
+        } finally {
+            if (frame != null) frame.recycle();
+            proxy.close();
+        }
     }
 
     private void onPreviewState(PreviewView.StreamState current) {
