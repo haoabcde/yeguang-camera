@@ -122,6 +122,32 @@ final class ScanPreview extends View {
             canvas.drawCircle(x(i), y(i), radius, paint);
         }
         paint.setStyle(Paint.Style.FILL);
+        if (dragCorner >= 0) drawCornerLoupe(canvas);
+    }
+
+    private void drawCornerLoupe(Canvas canvas) {
+        float radius = Math.min(ui.dp(44), Math.min(getWidth(), getHeight()) / 5f);
+        if (radius < ui.dp(20)) return;
+        float cx = crop.x(dragCorner) < .5f ? getWidth() - radius - ui.dp(16) : radius + ui.dp(16);
+        float cy = radius + ui.dp(16);
+        Path lens = new Path();
+        lens.addCircle(cx, cy, radius, Path.Direction.CW);
+        canvas.save();
+        canvas.clipPath(lens);
+        canvas.drawColor(ScanUi.PAPER);
+        canvas.translate(cx, cy);
+        float scale = 3 * imageRect.width() / bitmap.getWidth();
+        canvas.scale(scale, scale);
+        canvas.drawBitmap(bitmap, -crop.x(dragCorner) * bitmap.getWidth(),
+                -crop.y(dragCorner) * bitmap.getHeight(), paint);
+        canvas.restore();
+        paint.setColor(ScanUi.CROP);
+        paint.setStrokeWidth(ui.dp(2));
+        paint.setStyle(Paint.Style.STROKE);
+        canvas.drawCircle(cx, cy, radius, paint);
+        canvas.drawLine(cx - ui.dp(9), cy, cx + ui.dp(9), cy, paint);
+        canvas.drawLine(cx, cy - ui.dp(9), cx, cy + ui.dp(9), paint);
+        paint.setStyle(Paint.Style.FILL);
     }
 
     private void measureImage() {

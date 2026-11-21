@@ -19,16 +19,16 @@ import android.widget.TextView;
 import java.util.Locale;
 
 final class ScanUi {
-    static final int WHITE = 0xfffbfaf7;
+    static final int WHITE = 0xfff8f7f3;
     static final int PAPER = 0xffffffff;
-    static final int INK = 0xff292622;
-    static final int SECONDARY = 0xff686159;
-    static final int ACCENT = 0xff934d37;
-    static final int CROP = 0xffa9543c;
-    static final int ACCENT_SOFT = 0xfff4e8e1;
-    static final int LINE = 0xffe9e5df;
-    static final int BOARD = 0xffe9e8e5;
-    static final int SURFACE = 0xfff2f0ec;
+    static final int INK = 0xff292824;
+    static final int SECONDARY = 0xff6c6962;
+    static final int ACCENT = 0xff875541;
+    static final int CROP = 0xffa76c51;
+    static final int ACCENT_SOFT = 0xffeee5dc;
+    static final int LINE = 0xffe5e2da;
+    static final int BOARD = 0xffe8e6e0;
+    static final int SURFACE = 0xffeeede7;
     static final int RED = 0xffb22734;
 
     private final Context context;
@@ -90,7 +90,7 @@ final class ScanUi {
         button.setText(label);
         button.setAllCaps(false);
         button.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        button.setTextSize(15);
+        button.setTextSize(14);
         button.setTextColor(primary ? PAPER : INK);
         button.setIncludeFontPadding(false);
         button.setPadding(dp(14), dp(8), dp(14), dp(8));
@@ -100,7 +100,7 @@ final class ScanUi {
         button.setMinimumWidth(dp(48));
         button.setGravity(Gravity.CENTER);
         button.setStateListAnimator(null);
-        button.setBackground(ripple(primary ? INK : PAPER, 8, primary ? 0 : LINE));
+        button.setBackground(ripple(primary ? INK : SURFACE, 14, 0));
         button.setOnClickListener(v -> action.run());
         return button;
     }
@@ -108,7 +108,7 @@ final class ScanUi {
     Button quietButton(String label, int textColor, Runnable action) {
         Button button = button(label, false, action);
         button.setTextColor(textColor);
-        button.setBackground(ripple(0, 6, 0));
+        button.setBackground(ripple(0, 12, 0));
         return button;
     }
 
@@ -132,8 +132,9 @@ final class ScanUi {
         int color = selected ? ACCENT : foreground;
         LinearLayout tool = vertical();
         tool.setGravity(Gravity.CENTER);
-        tool.setPadding(dp(3), dp(5), dp(3), dp(5));
-        tool.setBackground(ripple(selected ? ACCENT_SOFT : 0, 10, 0));
+        tool.setPadding(dp(3), dp(7), dp(3), dp(7));
+        tool.setMinimumHeight(dp(52));
+        tool.setBackground(ripple(selected ? ACCENT_SOFT : 0, 14, 0));
         tool.setSelected(selected);
         tool.setFocusable(true);
         tool.setContentDescription(label);
@@ -142,8 +143,8 @@ final class ScanUi {
         image.setImageResource(icon);
         image.setImageTintList(ColorStateList.valueOf(color));
         image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        tool.addView(image, new LinearLayout.LayoutParams(dp(22), dp(22)));
-        TextView text = text(label, 13, color);
+        tool.addView(image, new LinearLayout.LayoutParams(dp(20), dp(20)));
+        TextView text = text(label, 11, color);
         text.setPadding(0, dp(4), 0, 0);
         text.setMaxLines(1);
         text.setEllipsize(TextUtils.TruncateAt.END);
@@ -154,11 +155,11 @@ final class ScanUi {
 
     View header(String title, Runnable backAction, String actionLabel, Runnable action) {
         LinearLayout toolbar = horizontal();
-        toolbar.setPadding(dp(8), dp(5), dp(14), dp(5));
+        toolbar.setPadding(dp(8), dp(4), dp(16), dp(4));
         toolbar.setBackgroundColor(WHITE);
         if (backAction != null) toolbar.addView(icon(R.drawable.ic_back, "返回", backAction),
                 new LinearLayout.LayoutParams(dp(48), dp(48)));
-        TextView heading = heading(title, 20);
+        TextView heading = heading(title, 18);
         heading.setMaxLines(1);
         heading.setEllipsize(TextUtils.TruncateAt.END);
         heading.setAccessibilityHeading(true);

@@ -38,6 +38,11 @@ public final class DocumentSearchTest {
             assertEquals(1, found.hits.size());
             assertEquals(page.id, found.hits.get(0).pageId);
             assertTrue(found.hits.get(0).context.contains("手写表格"));
+            DocumentSearch.Hit secondCell = DocumentSearch.find(store, app.getAssets(), "65", false, pass).hits.get(0);
+            assertEquals(ScanRecognition.HAND_TABLE, secondCell.reviewKey);
+            assertEquals(0, secondCell.tableIndex);
+            assertEquals(0, secondCell.row);
+            assertEquals(1, secondCell.column);
             assertTrue(DocumentSearch.find(store, app.getAssets(), "98765", false, pass).hits.isEmpty());
             corrected.text = "00981";
             corrected.reviewed = true;
@@ -51,6 +56,20 @@ public final class DocumentSearchTest {
             store.save(doc.withPages(List.of()));
             assertTrue(DocumentSearch.find(store, app.getAssets(), "00981", false, pass).hits.isEmpty());
         } finally { store.delete(doc); }
+    }
+
+    @Test public void selectedScanPagesRequireMatchingOrderCountAndSourcePositions() {
+        ScanDocument.Page second = new ScanDocument.Page(ScanStore.newId(), 0, CropQuad.FULL,
+                ScanDocument.Filter.ORIGINAL);
+        ScanDocument.Page fourth = new ScanDocument.Page(ScanStore.newId(), 0, CropQuad.FULL,
+                ScanDocument.Filter.ORIGINAL);
+        List<ScanDocument.Page> pages = List.of(second, fourth);
+        String mapping = second.id + ":2," + fourth.id + ":4";
+        assertTrue(MainActivity.matchesScanSubset(pages, pages, mapping, mapping));
+        assertFalse(MainActivity.matchesScanSubset(List.of(fourth, second), pages, mapping, mapping));
+        assertFalse(MainActivity.matchesScanSubset(List.of(fourth), pages, mapping, mapping));
+        assertFalse(MainActivity.matchesScanSubset(pages, pages, second.id + ":1," + fourth.id + ":4", mapping));
+        assertFalse(MainActivity.matchesScanSubset(pages, pages, null, mapping));
     }
 
     @Test public void documentTitleTracksOnlyItsChosenSourceAndSurvivesReopen() throws Exception {
@@ -114,6 +133,7 @@ public final class DocumentSearchTest {
             assertEquals(1, ocr.missingPages);
             assertEquals(1, ocr.hits.size());
             assertEquals(receipt.id, ocr.hits.get(0).pageId);
+            assertNull(ocr.hits.get(0).reviewKey);
             assertTrue(ocr.hits.get(0).context.startsWith("第 2 页"));
             assertEquals(1, DocumentSearch.find(store, app.getAssets(), "invoice", false, pass).hits.size());
 
@@ -124,8 +144,12 @@ public final class DocumentSearchTest {
             store.saveReview(doc, ScanRecognition.HANDWRITING,
                     new ScanRecognition.WordDraft(List.of("", "手记约定 00127")).json());
             assertEquals(1, DocumentSearch.find(store, app.getAssets(), "00127", false, pass).hits.size());
-            assertEquals(receipt.id, DocumentSearch.find(store, app.getAssets(), "手记约定", false, pass).hits.get(0).pageId);
-            assertEquals(receipt.id, DocumentSearch.find(store, app.getAssets(), "修订编号", false, pass).hits.get(0).pageId);
+            DocumentSearch.Hit hand = DocumentSearch.find(store, app.getAssets(), "手记约定", false, pass).hits.get(0);
+            assertEquals(receipt.id, hand.pageId);
+            assertEquals(ScanRecognition.HANDWRITING, hand.reviewKey);
+            DocumentSearch.Hit printed = DocumentSearch.find(store, app.getAssets(), "修订编号", false, pass).hits.get(0);
+            assertEquals(receipt.id, printed.pageId);
+            assertEquals(ScanRecognition.WORD, printed.reviewKey);
             OfficeTable.Cell code = new OfficeTable.Cell(0, 0, 1, 1, "A007450");
             OfficeTable.Cell next = new OfficeTable.Cell(0, 1, 1, 1, "01");
             OfficeTable table = new OfficeTable("物品", 2, 1, 2, false, List.of(code, next));

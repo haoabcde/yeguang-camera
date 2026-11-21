@@ -76,7 +76,9 @@ public final class TableViewportFlowTest {
 
     @Test public void controlsPersistPerDraftAcrossRotationRecreationAndReopening() throws Exception {
         try (ActivityScenario<MainActivity> app = ActivityScenario.launch(MainActivity.class)) {
-            open("Excel 表格");
+            tap("文件");
+            tap(doc.name + "，1 页");
+            open("印刷");
             tap("放大表格");
             node("125%");
             assertEquals(1.25f, saved(ScanRecognition.EXCEL).zoom, .001f);
@@ -95,7 +97,7 @@ public final class TableViewportFlowTest {
             assertEquals(1.25f, print.zoom, .001f);
 
             tap("返回");
-            open("手写转 Excel");
+            open("手写或混合");
             node("100%");
             assertEquals(168, saved(ScanRecognition.HAND_TABLE).columnWidths[0], 0);
             tap("缩小表格");
@@ -126,7 +128,7 @@ public final class TableViewportFlowTest {
                 app.onActivity(a -> a.setRequestedOrientation(priorOrientation.get()));
             }
             tap("返回");
-            open("Excel 表格");
+            open("印刷");
             node("125%");
             OfficeTable hand = saved(ScanRecognition.HAND_TABLE);
             assertEquals(.75f, hand.zoom, .001f);
@@ -136,7 +138,9 @@ public final class TableViewportFlowTest {
 
     @Test public void failedWriteRollsBackZoomAndSizesBeforeTheNextSave() throws Exception {
         try (ActivityScenario<MainActivity> app = ActivityScenario.launch(MainActivity.class)) {
-            open("Excel 表格");
+            tap("文件");
+            tap(doc.name + "，1 页");
+            open("印刷");
             tap("放大表格");
             node("125%");
             File directory = store.image(doc, doc.pages.get(0)).getParentFile();
@@ -165,10 +169,9 @@ public final class TableViewportFlowTest {
         return ScanRecognition.TableDraft.from(store.loadReview(doc, key)).tables.get(0);
     }
 
-    private void open(String format) {
-        tap("导出");
-        tap(format);
-        if ("Excel 表格".equals(format)) tap("印刷表格");
+    private void open(String mode) {
+        tap("提取表格");
+        tap(mode);
         node("导出 Excel");
     }
 

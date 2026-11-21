@@ -92,8 +92,9 @@ public final class ReviewEditingTest {
         store.saveReview(document, ScanRecognition.WORD,
                 new ScanRecognition.WordDraft(List.of("待修改", "第二页")).json());
         try (ActivityScenario<MainActivity> app = ActivityScenario.launch(MainActivity.class)) {
-            tap("导出");
-            tap("Word 文档");
+            openTestDocument();
+            tap("提取文字");
+            tap("印刷");
             tap("编辑正文");
             app.onActivity(activity -> {
                 EditText body = child(activity.getWindow().getDecorView(), EditText.class);
@@ -129,25 +130,27 @@ public final class ReviewEditingTest {
         store.saveReview(document, ScanRecognition.EXCEL, legacy);
         String before = store.loadReview(document, ScanRecognition.EXCEL).toString();
         try (ActivityScenario<MainActivity> app = ActivityScenario.launch(MainActivity.class)) {
-            tap("导出");
-            tap("Excel 表格");
-            node("选择文字类型");
-            tap("印刷表格");
+            openTestDocument();
+            tap("提取表格");
+            node("手写或混合");
+            tap("印刷");
             node("旧版校对稿未经过质量检查");
             tap("重新识别");
             node("第 1 页识别不可靠");
             saveEvidence("rejected-recognition");
             assertEquals(before, store.loadReview(document, ScanRecognition.EXCEL).toString());
             tap("返回原图");
-            tap("导出");
-            tap("Excel 表格");
-            tap("印刷表格");
+            node("保存修改");
+            tap("更多");
+            tap("提取表格");
+            tap("印刷");
             tap("继续校对旧稿");
             node("旧版识别稿未检查，导出前请逐项对照原图。");
             app.recreate();
             node("旧版识别稿未检查，导出前请逐项对照原图。");
             tap("导出 Excel");
-            node("请先核对旧版识别稿");
+            node("确认表格内容");
+            node("导出当前草稿");
             tap("继续校对");
             assertEquals(before, store.loadReview(document, ScanRecognition.EXCEL).toString());
         }
@@ -163,8 +166,8 @@ public final class ReviewEditingTest {
         store.saveReview(document, ScanRecognition.HAND_TABLE,
                 new ScanRecognition.TableDraft(List.of(hand), List.of()).checked(ScanRecognition.HAND_TABLE).json());
         try (ActivityScenario<MainActivity> app = ActivityScenario.launch(MainActivity.class)) {
-            tap("导出");
-            tap("Excel 表格");
+            openTestDocument();
+            tap("提取表格");
             saveEvidence("mode-picker");
             tap("手写或混合");
             node("校对手写表格");
@@ -197,9 +200,9 @@ public final class ReviewEditingTest {
         store.saveReview(document, ScanRecognition.EXCEL,
                 new ScanRecognition.TableDraft(List.of(sheet), List.of()).checked(ScanRecognition.EXCEL).json());
         try (ActivityScenario<MainActivity> app = ActivityScenario.launch(MainActivity.class)) {
-            tap("导出");
-            tap("Excel 表格");
-            tap("印刷表格");
+            openTestDocument();
+            tap("提取表格");
+            tap("印刷");
             node("导出 Excel");
             app.onActivity(activity -> {
                 TableGridView grid = child(activity.getWindow().getDecorView(), TableGridView.class);
@@ -234,8 +237,9 @@ public final class ReviewEditingTest {
         ScanDocument updated = document.withPages(List.of(document.pages.get(0).rotate(), document.pages.get(1)));
         store.save(updated);
         try (ActivityScenario<MainActivity> app = ActivityScenario.launch(MainActivity.class)) {
-            tap("导出");
-            tap("Word 文档");
+            openTestDocument();
+            tap("提取文字");
+            tap("印刷");
             tap("重新识别");
             node("重新识别没有读到文字，已保留原校对稿");
             assertEquals(original, ScanRecognition.WordDraft.from(
@@ -259,27 +263,30 @@ public final class ReviewEditingTest {
         OfficeTable print = new OfficeTable("印刷表", 1, 1, 1, false, List.of(new OfficeTable.Cell(0, 0, 1, 1, "原校对稿")));
         store.saveReview(document, ScanRecognition.EXCEL, new ScanRecognition.TableDraft(List.of(print), List.of()).checked(ScanRecognition.EXCEL).json());
         try (ActivityScenario<MainActivity> app = ActivityScenario.launch(MainActivity.class)) {
-            tap("导出");
-            tap("Excel 表格");
-            tap("印刷表格");
+            openTestDocument();
+            tap("提取表格");
+            tap("印刷");
             tap("校对操作");
             tap("按手写重新识别");
             tap("打开已有稿");
             node("校对手写表格");
             exportWithoutConfirmingCells();
             tap("导出 Excel");
-            node("还有 2 格未核对");
-            tap("继续核对");
+            node("确认表格内容");
+            node("还有 2 格未核对，其中 1 格存疑。\n请核对编号、金额及行列对应。");
+            tap("继续校对");
             node("编辑 A1");
             node("单元格原图局部，可缩放");
             tap("采用候选，00107");
             assertEquals("00101", handTables().get(0).cell(0, 0).text);
-            tap("确认下一项");
-            node("编辑 B1");
+            tap("确认");
+            node("存疑项已核对");
             OfficeTable.Cell confirmed = handTables().get(0).cell(0, 0);
             assertEquals("00107", confirmed.text);
             assertEquals(first.sourceBounds, confirmed.sourceBounds);
             assertTrue(confirmed.reviewed);
+            tap("核对其余项");
+            node("编辑 B1");
             tap("取消");
             app.recreate();
             node("校对手写表格");
@@ -309,8 +316,9 @@ public final class ReviewEditingTest {
                 new OfficeTable("第二页", 2, 1, 1, true, List.of(later)));
         store.saveReview(document, ScanRecognition.HAND_TABLE, new ScanRecognition.TableDraft(tables, List.of()).checked(ScanRecognition.HAND_TABLE).json());
         try (ActivityScenario<MainActivity> app = ActivityScenario.launch(MainActivity.class)) {
-            tap("导出");
-            tap("手写转 Excel");
+            openTestDocument();
+            tap("提取表格");
+            tap("手写或混合");
             tap("校对操作");
             tap("先核对存疑项（2）");
             node("编辑 B1");
@@ -346,7 +354,10 @@ public final class ReviewEditingTest {
         store.saveReview(document, ScanRecognition.HAND_TABLE,
                 new ScanRecognition.TableDraft(List.of(table), List.of()).checked(ScanRecognition.HAND_TABLE).json());
         try (ActivityScenario<MainActivity> app = ActivityScenario.launch(MainActivity.class)) {
-            tap("导出");tap("手写转 Excel");tap("A2 B，未核对");tap("确认下一项");
+            openTestDocument();
+            tap("提取表格");
+            tap("手写或混合");
+            tap("A2 B，未核对");tap("确认下一项");
             node("编辑 A3");
             tap("确认下一项");
             node("编辑 A1");
@@ -375,7 +386,10 @@ public final class ReviewEditingTest {
         store.saveReview(document, ScanRecognition.HAND_TABLE,
                 new ScanRecognition.TableDraft(List.of(original), List.of()).checked(ScanRecognition.HAND_TABLE).json());
         try (ActivityScenario<MainActivity> app = ActivityScenario.launch(MainActivity.class)) {
-            tap("导出");tap("手写转 Excel");tap("校对操作");tap("按原图调整分列");
+            openTestDocument();
+            tap("提取表格");
+            tap("手写或混合");
+            tap("校对操作");tap("按原图调整分列");
             node("本页原图，可缩放");
             tap("分列方式");tap("2 列");
             node("1 行 · 2 列 · 保留 2 项");
@@ -424,7 +438,7 @@ public final class ReviewEditingTest {
                 new Instrumentation.ActivityResult(Activity.RESULT_OK, result), true);
         try {
             tap("导出 Excel");
-            tap("仍然导出");
+            tap("导出当前草稿");
             node("文件已保存");
             try (ZipFile zip = new ZipFile(output)) {
                 String xml = part(zip, "xl/worksheets/sheet1.xml");
@@ -472,6 +486,7 @@ public final class ReviewEditingTest {
         ScanDocument reordered = document.withPages(List.of(document.pages.get(1), document.pages.get(0)));
         store.save(reordered);
         try (ActivityScenario<MainActivity> app = ActivityScenario.launch(MainActivity.class)) {
+            openTestDocument();
             for (boolean excel : List.of(false, true)) {
                 Context context = ApplicationProvider.getApplicationContext();
                 File exports = new File(context.getCacheDir(), "exports");
@@ -486,11 +501,11 @@ public final class ReviewEditingTest {
                 Instrumentation.ActivityMonitor picker = device.addMonitor(filter,
                         new Instrumentation.ActivityResult(Activity.RESULT_OK, result), true);
                 try {
-                    tap("导出");
-                    tap(excel ? "Excel 表格" : "Word 文档");
-                    if (excel) tap("印刷表格");
+                    tap(excel ? "提取表格" : "提取文字");
+                    tap("印刷");
+                    tap("查看旧稿");
+                    node("原图更新前的识别稿");
                     tap("导出旧稿");
-                    if (excel) tap("已核对，导出");
                     node("文件已保存");
                     assertEquals(1, picker.getHits());
                     try (ZipFile file = new ZipFile(output)) {
@@ -519,6 +534,11 @@ public final class ReviewEditingTest {
                 file.getInputStream(file.getEntry(path)), StandardCharsets.UTF_8))) {
             return reader.lines().collect(java.util.stream.Collectors.joining());
         }
+    }
+
+    private void openTestDocument() {
+        tap("文件");
+        tap(document.name + "，" + document.pages.size() + " 页");
     }
 
     private void tap(String label) {

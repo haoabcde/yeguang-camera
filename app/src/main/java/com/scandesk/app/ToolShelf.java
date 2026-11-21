@@ -4,9 +4,12 @@ import android.content.Context;
 import android.content.res.ColorStateList;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -14,6 +17,8 @@ import android.widget.TextView;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.function.Consumer;
 
 final class ToolShelf {
     private final Context context;
@@ -24,6 +29,11 @@ final class ToolShelf {
     private final ScrollView scroll;
     private final List<Button> tabs = new ArrayList<>();
     private final List<View> groups = new ArrayList<>();
+    private final List<List<LinearLayout>> rows = new ArrayList<>();
+    private final List<List<View>> separators = new ArrayList<>();
+    private final List<List<Item>> itemsByGroup = new ArrayList<>();
+    private TextView empty;
+    private EditText search;
     private final int columns;
     private int selected = -1;
 
@@ -32,26 +42,90 @@ final class ToolShelf {
         this.ui = ui;
         int width = context.getResources().getConfiguration().screenWidthDp;
         float font = context.getResources().getConfiguration().fontScale;
-        columns = width >= 640 && font < 1.5f ? 3 : width >= 360 && font < 1.5f ? 2 : 1;
+        columns = width >= 640 && font < 1.5f ? 4 : width >= 360 && font < 1.5f ? 3
+                : width >= 360 ? 2 : 1;
         layout = ui.vertical();
-        layout.addView(ui.header("全部工具", back, null, null));
+        layout.addView(ui.header("工具", back, null, null));
+        layout.setFocusableInTouchMode(true);
         categories = ui.horizontal();
         categories.setPadding(ui.dp(20), 0, ui.dp(20), 0);
         layout.addView(categories, new LinearLayout.LayoutParams(ui.match(), ui.wrap()));
-        layout.addView(ui.rule());
         scroll = new ScrollView(context);
         scroll.setFillViewport(true);
         content = ui.vertical();
-        content.setPadding(ui.dp(24), ui.dp(1), ui.dp(24), ui.dp(24));
+        content.setPadding(ui.dp(20), ui.dp(2), ui.dp(20), ui.dp(24));
         scroll.addView(content, new ScrollView.LayoutParams(width >= 720 ? ui.dp(688) : ui.match(),
                 ui.wrap(), Gravity.CENTER_HORIZONTAL));
         layout.addView(scroll, new LinearLayout.LayoutParams(ui.match(), 0, 1));
     }
 
+    void search(String value, Consumer<String> changed) {
+        search = new EditText(context);
+        search.setSingleLine();
+        search.setHint("搜索工具，比如去阴影");
+        search.setTextSize(13);
+        search.setTextColor(ScanUi.INK);
+        search.setHintTextColor(ScanUi.SECONDARY);
+        search.setMinHeight(ui.dp(48));
+        search.setPadding(ui.dp(13), 0, ui.dp(13), 0);
+        search.setBackground(ui.panel(ScanUi.SURFACE, 14, 0));
+        search.setText(value);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ui.match(), ui.wrap());
+        params.setMargins(ui.dp(20), ui.dp(3), ui.dp(20), ui.dp(6));
+        layout.addView(search, 1, params);
+        search.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence text, int start, int before, int count) {
+                changed.accept(text.toString());
+                filter(text.toString());
+            }
+            @Override public void afterTextChanged(Editable text) {}
+        });
+    }
+
+    private void filter(String query) {
+        String term = normalize(query);
+        int total = 0;
+        for (int section = 0; section < groups.size(); section++) {
+            List<Item> items = itemsByGroup.get(section);
+            List<LinearLayout> groupRows = rows.get(section);
+            List<View> rules = separators.get(section);
+            int count = rebuildRows(items, groupRows, rules, term);
+            total += count;
+            groups.get(section).setVisibility(count > 0 ? View.VISIBLE : View.GONE);
+            tabs.get(section).setVisibility(count > 0 ? View.VISIBLE : View.GONE);
+        }
+        if (empty != null) empty.setVisibility(total == 0 ? View.VISIBLE : View.GONE);
+        categories.setVisibility(term.isEmpty() ? View.VISIBLE : View.GONE);
+        if (!term.isEmpty()) scroll.scrollTo(0, 0);
+    }
+
+    private int rebuildRows(List<Item> items, List<LinearLayout> groupRows, List<View> rules, String term) {
+        int count = 0;
+        for (LinearLayout row : groupRows) row.removeAllViews();
+        for (Item item : items) {
+            if (!normalize(item.label + item.detail + item.aliases).contains(term)) continue;
+            LinearLayout.LayoutParams slot = new LinearLayout.LayoutParams(0, ui.match(), 1);
+            slot.setMarginEnd(ui.dp(6));
+            groupRows.get(count / columns).addView(tile(item), slot);
+            count++;
+        }
+        for (int i = 0; i < groupRows.size(); i++) {
+            int visibility = i * columns < count ? View.VISIBLE : View.GONE;
+            groupRows.get(i).setVisibility(visibility);
+            rules.get(i).setVisibility(visibility);
+        }
+        return count;
+    }
+
+    private static String normalize(String value) {
+        return value.replace(" ", "").trim().toLowerCase(Locale.ROOT);
+    }
+
     void section(String tabLabel, String name, Item... items) {
         LinearLayout group = ui.vertical();
-        group.setPadding(0, ui.dp(22), 0, ui.dp(8));
-        TextView label = ui.heading(name, 19);
+        group.setPadding(0, ui.dp(20), 0, ui.dp(8));
+        TextView label = ui.heading(name, 16);
         label.setAccessibilityHeading(true);
         label.setPadding(0, 0, 0, ui.dp(12));
         group.addView(label);
@@ -68,21 +142,32 @@ final class ToolShelf {
         groups.add(group);
         tabs.add(tab);
 
-        group.addView(ui.rule());
+        List<LinearLayout> groupRows = new ArrayList<>();
+        List<View> groupRules = new ArrayList<>();
         for (int start = 0; start < items.length; start += columns) {
             LinearLayout row = ui.horizontal();
-            for (int index = start; index < Math.min(start + columns, items.length); index++) {
-                row.addView(tile(items[index]), new LinearLayout.LayoutParams(0, ui.wrap(), 1));
-            }
+            View divider = ui.rule();
+            divider.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+            divider.setLayoutParams(new LinearLayout.LayoutParams(ui.match(), ui.dp(8)));
             group.addView(row, new LinearLayout.LayoutParams(ui.match(), ui.wrap()));
-            group.addView(ui.rule());
+            group.addView(divider);
+            groupRows.add(row);
+            groupRules.add(divider);
         }
+        rows.add(groupRows);
+        separators.add(groupRules);
+        itemsByGroup.add(java.util.Arrays.asList(items));
         content.addView(group, new LinearLayout.LayoutParams(ui.match(), ui.wrap()));
     }
 
     int offset() { return scroll.getScrollY(); }
 
     View view(int offset) {
+        empty = ui.text("没有匹配的工具", 14, ScanUi.SECONDARY);
+        empty.setPadding(0, ui.dp(16), 0, 0);
+        content.addView(empty);
+        filter(search == null ? "" : search.getText().toString());
+        layout.requestFocus();
         select(0);
         scroll.setOnScrollChangeListener((v, x, y, oldX, oldY) -> {
             int visible = 0;
@@ -98,23 +183,34 @@ final class ToolShelf {
     }
 
     private View tile(Item item) {
-        LinearLayout tile = ui.horizontal();
-        tile.setMinimumHeight(ui.dp(52));
-        tile.setPadding(ui.dp(2), ui.dp(8), ui.dp(8), ui.dp(8));
-        tile.setBackground(ui.ripple(0, 6, 0));
+        LinearLayout tile = ui.vertical();
+        tile.setMinimumHeight(ui.dp(112));
+        tile.setPadding(ui.dp(8), ui.dp(12), ui.dp(6), ui.dp(12));
+        tile.setBackground(ui.ripple(0, 14, 0));
         tile.setContentDescription(item.label);
         tile.setFocusable(true);
         tile.setOnClickListener(v -> item.action.run());
         ImageView icon = new ImageView(context);
         icon.setImageResource(item.icon);
-        icon.setImageTintList(ColorStateList.valueOf(ScanUi.SECONDARY));
-        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(ui.dp(20), ui.dp(20));
-        iconParams.setMarginEnd(ui.dp(11));
+        icon.setImageTintList(ColorStateList.valueOf(ScanUi.INK));
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(ui.dp(23), ui.dp(23));
+        iconParams.bottomMargin = ui.dp(12);
         tile.addView(icon, iconParams);
-        TextView name = ui.text(item.label, 14, ScanUi.INK);
-        tile.addView(name, new LinearLayout.LayoutParams(0, ui.wrap(), 1));
+        LinearLayout labels = ui.vertical();
+        TextView name = ui.text(item.label, 12, ScanUi.INK);
+        name.setMaxLines(2);
+        labels.addView(name);
+        if (!item.detail.isEmpty()) {
+            TextView detail = ui.text(item.detail, 11, ScanUi.SECONDARY);
+            detail.setPadding(0, ui.dp(5), 0, 0);
+            detail.setMaxLines(2);
+            detail.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            labels.addView(detail);
+        }
+        labels.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        tile.setContentDescription(item.label + (item.detail.isEmpty() ? "" : "，" + item.detail));
+        tile.addView(labels, new LinearLayout.LayoutParams(ui.match(), ui.wrap()));
         icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        name.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         return tile;
     }
 
@@ -142,12 +238,16 @@ final class ToolShelf {
     static final class Item {
         final String label;
         final int icon;
+        final String detail;
+        final String aliases;
         final Runnable action;
 
-        Item(String label, int icon, Runnable action) {
+        Item(String label, int icon, String detail, String aliases, Runnable action) {
             this.label = label;
             this.icon = icon;
             this.action = action;
+            this.detail = detail;
+            this.aliases = aliases;
         }
     }
 }

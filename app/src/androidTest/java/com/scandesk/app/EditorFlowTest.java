@@ -3,6 +3,7 @@ package com.scandesk.app;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -83,7 +84,7 @@ public final class EditorFlowTest {
         CropQuad inset = CropQuad.FULL.move(0, .12f, .16f);
         ScanDocument.Page first = new ScanDocument.Page(ScanStore.newId(), 0, inset, ScanDocument.Filter.ORIGINAL);
         ScanDocument.Page second = new ScanDocument.Page(ScanStore.newId(), 0, inset, ScanDocument.Filter.ORIGINAL);
-        ScanDocument sample = store.newDocument().withPages(List.of(first, second));
+        ScanDocument sample = store.newDocument().renamed("裁切与页序回归").withPages(List.of(first, second));
         store.save(sample);
         SharedPreferences prefs = context.getSharedPreferences("workspace", Context.MODE_PRIVATE);
         Map<String, ?> before = prefs.getAll();
@@ -105,6 +106,8 @@ public final class EditorFlowTest {
             assertTrue(prefs.edit().putString("document", sample.id).putString("page", first.id)
                     .putBoolean("crop", false).commit());
             try (ActivityScenario<MainActivity> screen = ActivityScenario.launch(MainActivity.class)) {
+                click(screen, sample.name + "，2 页");
+                click(screen, "编辑图片");
                 click(screen, "裁切");
                 click(screen, "重置");
                 click(screen, "第 2 页");
@@ -136,11 +139,17 @@ public final class EditorFlowTest {
 
                 click(screen, "裁切");
                 click(screen, "重置");
-                click(screen, "完成");
+                click(screen, "保存修改");
                 assertEquals(CropQuad.FULL, store.load(sample.id).pages.get(0).crop);
                 assertFalse(prefs.getBoolean("crop", true));
+                screen.onActivity(activity -> assertNotNull(clickable(
+                        activity.findViewById(android.R.id.content), "编辑图片")));
                 click(screen, "返回");
-                assertFalse(prefs.contains("document"));
+                screen.onActivity(activity -> {
+                    View home = clickable(activity.findViewById(android.R.id.content), "首页");
+                    assertNotNull(home);
+                    assertTrue(home.isSelected());
+                });
             }
         } finally {
             device.removeMonitor(cancelCamera);
@@ -189,7 +198,7 @@ public final class EditorFlowTest {
             openedLibrary = true;
             try (ActivityScenario<MainActivity> screen = ActivityScenario.launch(MainActivity.class)) {
                 click(screen, "从相册导入");
-                clickDialog("知道了");
+                clickDialog("保存文档");
                 assertEquals(1, album.getHits());
                 ScanDocument imported = store.load(prefs.getString("document", null));
                 assertNotNull(imported);
@@ -213,6 +222,45 @@ public final class EditorFlowTest {
             if (imported != null) store.delete(imported);
             for (File file : files) file.delete();
             batch.delete();
+        }
+    }
+
+    @Test public void topLevelNavigationShowsFilesAndToolsThenOpensScanDetail() throws Exception {
+        Context context = ApplicationProvider.getApplicationContext();
+        SharedPreferences prefs = context.getSharedPreferences("workspace", Context.MODE_PRIVATE);
+        Map<String, ?> before = prefs.getAll();
+        ScanStore store = new ScanStore(context);
+        ScanDocument.Page page = new ScanDocument.Page(ScanStore.newId(), 0, CropQuad.FULL,
+                ScanDocument.Filter.ORIGINAL);
+        ScanDocument sample = store.newDocument().renamed("导航测试扫描件").withPages(List.of(page));
+        try {
+            store.save(sample);
+            assertTrue(prefs.edit().remove("document").remove("page").remove("crop").commit());
+            try (ActivityScenario<MainActivity> screen = ActivityScenario.launch(MainActivity.class)) {
+                screen.onActivity(activity -> assertNotNull(clickable(
+                        activity.findViewById(android.R.id.content), "从相册导入")));
+                click(screen, "工具");
+                click(screen, "提取表格");
+                assertNotNull(awaitDialogNode("从已有扫描件选择"));
+                clickDialog("关闭");
+                click(screen, "文件");
+                click(screen, sample.name + "，1 页");
+                screen.onActivity(activity -> {
+                    View content = activity.findViewById(android.R.id.content);
+                    assertNotNull(clickable(content, "提取文字"));
+                    assertNotNull(clickable(content, "提取表格"));
+                    assertNull(clickable(content, "文件"));
+                });
+                click(screen, "返回");
+                screen.onActivity(activity -> {
+                    View fileTab = clickable(activity.findViewById(android.R.id.content), "文件");
+                    assertNotNull(fileTab);
+                    assertTrue(fileTab.isSelected());
+                });
+            }
+        } finally {
+            restoreSelection(prefs, before);
+            store.delete(sample);
         }
     }
 
@@ -241,7 +289,8 @@ public final class EditorFlowTest {
     }
 
     private static View clickable(View view, String label) {
-        if (view.isClickable() && (label.equals(view.getContentDescription())
+        String description = String.valueOf(view.getContentDescription());
+        if (view.isClickable() && (description.equals(label) || description.startsWith(label + "，")
                 || view instanceof TextView text && label.contentEquals(text.getText()))) return view;
         if (view instanceof ViewGroup group) {
             for (int i = 0; i < group.getChildCount(); i++) {
@@ -253,20 +302,31 @@ public final class EditorFlowTest {
     }
 
     private void clickDialog(String label) {
+        AccessibilityNodeInfo item = awaitDialogNode(label);
+        assertTrue(label, item.performAction(AccessibilityNodeInfo.ACTION_CLICK));
+        device.waitForIdleSync();
+    }
+
+    private AccessibilityNodeInfo awaitDialogNode(String label) {
         long until = SystemClock.uptimeMillis() + 5000;
         while (SystemClock.uptimeMillis() < until) {
-            AccessibilityNodeInfo root = device.getUiAutomation().getRootInActiveWindow();
-            if (root != null) {
-                for (AccessibilityNodeInfo item : root.findAccessibilityNodeInfosByText(label)) {
-                    if (item.isClickable() && item.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                        device.waitForIdleSync();
-                        return;
-                    }
-                }
-            }
+            AccessibilityNodeInfo item = clickableNode(device.getUiAutomation().getRootInActiveWindow(), label);
+            if (item != null) return item;
             SystemClock.sleep(35);
         }
-        fail("找不到可点击的选项 " + label);
+        throw new AssertionError("找不到可点击的选项 " + label);
+    }
+
+    private static AccessibilityNodeInfo clickableNode(AccessibilityNodeInfo node, String label) {
+        if (node == null) return null;
+        String description = String.valueOf(node.getContentDescription());
+        if (node.isClickable() && (label.equals(String.valueOf(node.getText()))
+                || description.equals(label) || description.startsWith(label + "，"))) return node;
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = clickableNode(node.getChild(i), label);
+            if (child != null) return child;
+        }
+        return null;
     }
 
     private static void touch(ScanPreview view, int action, float... points) {

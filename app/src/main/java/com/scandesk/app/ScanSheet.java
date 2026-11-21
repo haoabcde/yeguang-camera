@@ -29,7 +29,7 @@ final class ScanSheet {
         body.setBackground(ui.panel(ScanUi.WHITE, 22, 0));
         body.setPadding(ui.dp(14), ui.dp(12), ui.dp(14), ui.dp(19));
         LinearLayout heading = ui.horizontal();
-        TextView label = ui.heading(title, 21);
+        TextView label = ui.heading(title, 18);
         label.setPadding(ui.dp(8), ui.dp(8), 0, ui.dp(8));
         label.setAccessibilityHeading(true);
         heading.addView(label, new LinearLayout.LayoutParams(0, ui.wrap(), 1));
@@ -43,7 +43,7 @@ final class ScanSheet {
     }
 
     void detail(String message) {
-        TextView label = ui.text(message, 14, ScanUi.SECONDARY);
+        TextView label = ui.text(message, 12, ScanUi.SECONDARY);
         label.setPadding(ui.dp(8), ui.dp(4), ui.dp(8), ui.dp(12));
         label.setLineSpacing(ui.dp(3), 1);
         body.addView(label, new LinearLayout.LayoutParams(ui.match(), ui.wrap()));
@@ -76,9 +76,9 @@ final class ScanSheet {
         }
         LinearLayout labels = ui.vertical();
         labels.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-        labels.addView(ui.text(label, 16, selected ? ScanUi.ACCENT : ScanUi.INK));
+        labels.addView(ui.text(label, 14, selected ? ScanUi.ACCENT : ScanUi.INK));
         if (description != null) {
-            TextView hint = ui.text(description, 13, ScanUi.SECONDARY);
+            TextView hint = ui.text(description, 12, ScanUi.SECONDARY);
             hint.setPadding(0, ui.dp(5), 0, 0);
             labels.addView(hint);
         }

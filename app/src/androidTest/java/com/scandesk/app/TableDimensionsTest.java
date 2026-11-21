@@ -1,5 +1,7 @@
 package com.scandesk.app;
 
+import android.graphics.RectF;
+
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 
 import org.json.JSONArray;
@@ -107,6 +109,41 @@ public final class TableDimensionsTest {
         assertEquals("B2", amount.getAttribute("r"));
         assertEquals("120.50", amount.getTextContent());
         assertEquals(1, amount.getElementsByTagName("v").getLength());
+    }
+
+    @Test public void workbookMarksPendingAndUncertainCellsWithoutChangingData() throws Exception {
+        OfficeTable marked = sampleTable();
+        marked.cell(0, 0).sourceBounds = new RectF(0f, 0f, 0.5f, 0.33f);
+        marked.cell(0, 1).needsReview = true;
+        marked.cell(1, 0).needsReview = true;
+        marked.cell(1, 0).reviewed = true;
+        marked.cell(1, 0).sourceBounds = new RectF(0f, 0.33f, 0.5f, 0.66f);
+        marked.cell(1, 1).needsReview = true;
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        OfficeExport.excel(List.of(marked, sampleTable()), bytes);
+
+        byte[] workbook = bytes.toByteArray();
+        Document sheet = readEntry(workbook, "xl/worksheets/sheet1.xml");
+        Document clean = readEntry(workbook, "xl/worksheets/sheet2.xml");
+        Document styles = readEntry(workbook, "xl/styles.xml");
+        Element pendingHeader = element(sheet, "c", 0);
+        Element uncertainHeader = element(sheet, "c", 1);
+        Element reviewedText = element(sheet, "c", 2);
+        Element uncertainAmount = element(sheet, "c", 3);
+
+        assertEquals("3", pendingHeader.getAttribute("s"));
+        assertEquals("5", uncertainHeader.getAttribute("s"));
+        assertEquals("0", reviewedText.getAttribute("s"));
+        assertEquals("inlineStr", reviewedText.getAttribute("t"));
+        assertEquals("001", reviewedText.getTextContent());
+        assertEquals("4", uncertainAmount.getAttribute("s"));
+        assertEquals("120.50", uncertainAmount.getTextContent());
+        assertEquals(1, uncertainAmount.getElementsByTagName("v").getLength());
+        assertEquals("FFFFF4CC", element(styles, "fgColor", 0).getAttribute("rgb"));
+        assertEquals("FFFCD5B5", element(styles, "fgColor", 1).getAttribute("rgb"));
+        assertEquals("&C浅黄：未核对　浅橙：识别存疑，待核对",
+                element(sheet, "oddFooter", 0).getTextContent());
+        assertEquals(0, clean.getElementsByTagName("oddFooter").getLength());
     }
 
     private static OfficeTable sampleTable() {

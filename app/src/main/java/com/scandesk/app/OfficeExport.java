@@ -111,6 +111,8 @@ final class OfficeExport {
             xml.append("\" customWidth=\"1\"/>");
         }
         xml.append("</cols><sheetData>");
+        boolean hasPending = false;
+        boolean hasUncertain = false;
         for (int r = 0; r < table.rows; r++) {
             xml.append("<row r=\"").append(r + 1).append('"');
             float height = table.rowHeight(r);
@@ -119,7 +121,14 @@ final class OfficeExport {
             for (int c = 0; c < table.columns; c++) {
                 OfficeTable.Cell cell = table.cell(r, c);
                 if (cell == null || cell.row != r || cell.column != c) continue;
-                xml.append("<c r=\"").append(address(r, c)).append("\" s=\"").append(r == 0 ? 1 : 0).append('"');
+                boolean uncertain = cell.needsReview && !cell.reviewed;
+                boolean pending = cell.unreviewed() && !uncertain;
+                hasPending |= pending;
+                hasUncertain |= uncertain;
+                int style = r == 0 ? 1 : 0;
+                if (uncertain) style += 4;
+                else if (pending) style += 2;
+                xml.append("<c r=\"").append(address(r, c)).append("\" s=\"").append(style).append('"');
                 String number = null;
                 if (cell.type == OfficeTable.CellType.NUMBER
                         || cell.type == OfficeTable.CellType.AUTO && !identifiers[c]) {
@@ -148,6 +157,13 @@ final class OfficeExport {
             }
             xml.append("</mergeCells>");
         }
+        if (hasPending || hasUncertain) {
+            xml.append("<headerFooter><oddFooter>&amp;C");
+            if (hasPending) xml.append("浅黄：未核对");
+            if (hasPending && hasUncertain) xml.append("　");
+            if (hasUncertain) xml.append("浅橙：识别存疑，待核对");
+            xml.append("</oddFooter></headerFooter>");
+        }
         return xml.append("</worksheet>").toString();
     }
 
@@ -174,14 +190,27 @@ final class OfficeExport {
         return "<styleSheet xmlns=\"" + SHEET + "\">"
                 + "<fonts count=\"2\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font>"
                 + "<font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts>"
-                + "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill>"
-                + "<fill><patternFill patternType=\"gray125\"/></fill></fills>"
+                + "<fills count=\"4\"><fill><patternFill patternType=\"none\"/></fill>"
+                + "<fill><patternFill patternType=\"gray125\"/></fill>"
+                + reviewFill("FFFFF4CC") + reviewFill("FFFCD5B5") + "</fills>"
                 + "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>"
                 + "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>"
-                + "<cellXfs count=\"2\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>"
-                + "<xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/></cellXfs>"
+                + "<cellXfs count=\"6\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>"
+                + "<xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/>"
+                + reviewStyle(0, 2) + reviewStyle(1, 2)
+                + reviewStyle(0, 3) + reviewStyle(1, 3) + "</cellXfs>"
                 + "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>"
                 + "</styleSheet>";
+    }
+
+    private static String reviewFill(String color) {
+        return "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"" + color
+                + "\"/><bgColor indexed=\"64\"/></patternFill></fill>";
+    }
+
+    private static String reviewStyle(int fontId, int fillId) {
+        return "<xf numFmtId=\"0\" fontId=\"" + fontId + "\" fillId=\"" + fillId
+                + "\" borderId=\"0\" xfId=\"0\" applyFill=\"1\" applyFont=\"1\"/>";
     }
 
     private static String typesOpen() {

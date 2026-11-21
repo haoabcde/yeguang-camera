@@ -52,7 +52,7 @@ import java.io.BufferedOutputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.text.DateFormat;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashSet;
@@ -73,7 +73,7 @@ public final class MainActivity extends ComponentActivity {
     private static final int SAVE_FILE = 102;
     private static final Pattern DEFAULT_SCAN_NAME =
             Pattern.compile("^扫描件 \\d{4}-(\\d{2})-(\\d{2}) (\\d{2})\\.(\\d{2})$");
-    private enum Screen { LIBRARY, EDITOR, WORD, EXCEL, TOOLS, PDF, FOLDER, SEARCH }
+    private enum Screen { LIBRARY, FILES, DETAIL, EDITOR, WORD, EXCEL, TOOLS, PDF, FOLDER, SEARCH }
     private enum PdfTool { OPEN, ADD, MERGE, PAGES, SAVE, SPLIT, TEXT, WORD, EXCEL, PNG, IMAGES, LONG,
         COMPRESS, WATERMARK, SIGN }
     private enum ImageTool { EDIT, CROP, ENHANCE, SCREEN, WORD, HANDWRITING, TABLE, HAND_TABLE, QR, RESIZE, PASSPORT, LONG,
@@ -88,11 +88,43 @@ public final class MainActivity extends ComponentActivity {
     private final Runnable saveWord = () -> saveWordDraft(true);
 
     private ScanStore store;
+    private ExportHistory exportHistory;
+    private String pendingDocumentId;
+    private boolean pickingForCapture;
+    private static final String INCOMING_FILES = "pendingCapture.files";
+    private String importingShortcut;
     private PdfWorkspace pdfStore;
     private ScanUi ui;
     private SharedPreferences preferences;
     private FrameLayout root;
     private Screen screen = Screen.LIBRARY;
+    private enum FileFilter { ALL, SCANS, PDF, REVIEWS, EXPORTS }
+    private FileFilter fileFilter = FileFilter.ALL;
+    private final Set<String> selectedFiles = new LinkedHashSet<>();
+    private boolean selectingFiles;
+    private static final String DEFAULT_A4 = "export.defaultA4";
+    private static final String DEFAULT_PNG = "export.defaultPng";
+    private static final String SUBSET = "scanReviewSubset/";
+    private static final String SUBSET_SOURCE = "scanReviewSource/";
+    private static final String SUBSET_PAGES = "scanReviewSourcePages/";
+    private Screen searchReturn = Screen.LIBRARY;
+    private Screen reviewReturn = Screen.DETAIL;
+    private Screen detailReturn = Screen.LIBRARY;
+    private boolean batchEditing;
+    private ImageTool batchAction = ImageTool.EDIT;
+    private String captureMode = "file";
+    private boolean captureHandwriting;
+    private boolean toolsResumeCapture;
+    private String parkedBatchId;
+    private String parkedMode;
+    private boolean parkedHandwriting;
+    private ImageTool parkedAction = ImageTool.EDIT;
+    private Screen parkedReturn = Screen.LIBRARY;
+    private Screen parkedEditorReturn = Screen.LIBRARY;
+    private String toolQuery = "";
+    private boolean filterByFolder;
+    private int fileOffset;
+    private ScrollView fileScroll;
     private ScanDocument document;
     private String selectedPage;
     private boolean cropping;
@@ -127,6 +159,7 @@ public final class MainActivity extends ComponentActivity {
     private int tableIndex;
     private boolean wordDirty;
     private AlertDialog bookPreviewDialog;
+    private AlertDialog toolPreviewDialog;
     private String pendingFile;
     private String pendingName;
     private FileFormat pendingFormat;
@@ -142,6 +175,7 @@ public final class MainActivity extends ComponentActivity {
         super.onCreate(state);
         ui = new ScanUi(this);
         store = new ScanStore(this);
+        exportHistory = new ExportHistory(this);
         pdfStore = new PdfWorkspace(this);
         PdfTools.initialize(getApplicationContext());
         preferences = getSharedPreferences("workspace", MODE_PRIVATE);
@@ -177,12 +211,38 @@ public final class MainActivity extends ComponentActivity {
             String openId = preferences.getString("document", null);
             if (openId != null) document = store.load(openId);
             if (document != null) {
-                screen = Screen.EDITOR;
+                screen = Screen.DETAIL;
                 selectedPage = preferences.getString("page", null);
                 cropping = preferences.getBoolean("crop", false);
             }
-            if (state == null) return;
+            if (state == null) {
+                screen = Screen.LIBRARY;
+                return;
+            }
+            batchEditing = state.getBoolean("batchEditing");
+            batchAction = ImageTool.valueOf(state.getString("batchAction", ImageTool.EDIT.name()));
+            captureMode = state.getString("captureMode", "file");
+            captureHandwriting = state.getBoolean("captureHandwriting");
+            toolsResumeCapture = state.getBoolean("toolsResumeCapture");
+            parkedBatchId = state.getString("parkedBatchId");
+            parkedMode = state.getString("parkedMode");
+            parkedHandwriting = state.getBoolean("parkedHandwriting");
+            parkedAction = ImageTool.valueOf(state.getString("parkedAction", ImageTool.EDIT.name()));
+            parkedReturn = Screen.valueOf(state.getString("parkedReturn", Screen.LIBRARY.name()));
+            parkedEditorReturn = Screen.valueOf(state.getString("parkedEditorReturn", Screen.LIBRARY.name()));
+            detailReturn = Screen.valueOf(state.getString("detailReturn", Screen.LIBRARY.name()));
+            searchReturn = Screen.valueOf(state.getString("searchReturn", Screen.LIBRARY.name()));
+            reviewReturn = Screen.valueOf(state.getString("reviewReturn", Screen.DETAIL.name()));
+            fileFilter = FileFilter.valueOf(state.getString("fileFilter", FileFilter.ALL.name()));
+            filterByFolder = state.getBoolean("filterByFolder");
+            fileOffset = state.getInt("fileOffset");
+            selectingFiles = state.getBoolean("selectingFiles");
+            ArrayList<String> selection = state.getStringArrayList("selectedFiles");
+            if (selection != null) selectedFiles.addAll(selection);
+            toolQuery = state.getString("toolQuery", "");
             pendingFile = state.getString("export");
+            pendingDocumentId = state.getString("exportDocumentId");
+            pickingForCapture = state.getBoolean("pickingForCapture");
             pendingName = state.getString("exportName");
             String format = state.getString("exportFormat");
             if (format != null) pendingFormat = FileFormat.valueOf(format);
@@ -203,12 +263,20 @@ public final class MainActivity extends ComponentActivity {
                 screen = Screen.PDF;
                 return;
             }
-            if (Screen.TOOLS.name().equals(lastScreen) || Screen.FOLDER.name().equals(lastScreen)
+            if (Screen.TOOLS.name().equals(lastScreen) || Screen.FILES.name().equals(lastScreen)
+                    || Screen.LIBRARY.name().equals(lastScreen) || Screen.FOLDER.name().equals(lastScreen)
                     || Screen.SEARCH.name().equals(lastScreen)) {
                 screen = Screen.valueOf(lastScreen);
                 return;
             }
             if (document == null) return;
+            if (Screen.EDITOR.name().equals(lastScreen)) screen = Screen.EDITOR;
+            if (reviewReturn == Screen.PDF || detailReturn == Screen.PDF) {
+                pdfReturn = Screen.valueOf(state.getString("pdfReturn", Screen.LIBRARY.name()));
+                pdfPages = pdfStore.load();
+                pdfLoaded = true;
+                pdfPage = state.getInt("pdfPage");
+            }
             pendingCrop = CropQuad.from(state.getFloatArray("pendingCrop"));
             if (Screen.WORD.name().equals(lastScreen)) {
                 wordReviewKey = state.getBoolean("handwriting") ? ScanRecognition.HANDWRITING : ScanRecognition.WORD;
@@ -236,6 +304,26 @@ public final class MainActivity extends ComponentActivity {
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
         state.putString("screen", screen.name());
+        state.putBoolean("batchEditing", batchEditing);
+        state.putString("batchAction", batchAction.name());
+        state.putString("captureMode", captureMode);
+        state.putBoolean("captureHandwriting", captureHandwriting);
+        state.putBoolean("toolsResumeCapture", toolsResumeCapture);
+        state.putString("parkedBatchId", parkedBatchId);
+        state.putString("parkedMode", parkedMode);
+        state.putBoolean("parkedHandwriting", parkedHandwriting);
+        state.putString("parkedAction", parkedAction.name());
+        state.putString("parkedReturn", parkedReturn.name());
+        state.putString("parkedEditorReturn", parkedEditorReturn.name());
+        state.putString("detailReturn", detailReturn.name());
+        state.putString("searchReturn", searchReturn.name());
+        state.putString("reviewReturn", reviewReturn.name());
+        state.putString("fileFilter", fileFilter.name());
+        state.putBoolean("filterByFolder", filterByFolder);
+        state.putInt("fileOffset", fileScroll == null ? fileOffset : fileScroll.getScrollY());
+        state.putBoolean("selectingFiles", selectingFiles);
+        state.putStringArrayList("selectedFiles", new ArrayList<>(selectedFiles));
+        state.putString("toolQuery", toolQuery);
         state.putString("searchInput", searchView == null ? searchInput : searchView.input.getText().toString());
         state.putString("searchQuery", searchQuery);
         state.putString("imageTool", nextImageTool.name());
@@ -247,6 +335,8 @@ public final class MainActivity extends ComponentActivity {
         state.putString("folder", folder.name());
         state.putInt("pdfPage", pdfPage);
         state.putString("export", pendingFile);
+        state.putString("exportDocumentId", pendingDocumentId);
+        state.putBoolean("pickingForCapture", pickingForCapture);
         state.putString("exportName", pendingName);
         state.putString("exportFormat", pendingFormat == null ? null : pendingFormat.name());
         state.putFloatArray("pendingCrop", pendingCrop == null ? null : pendingCrop.values());
@@ -272,6 +362,7 @@ public final class MainActivity extends ComponentActivity {
     @Override protected void onDestroy() {
         main.removeCallbacks(saveWord);
         if (bookPreviewDialog != null) bookPreviewDialog.dismiss();
+        if (toolPreviewDialog != null) toolPreviewDialog.dismiss();
         if (job != null) {
             job.cancel();
             job.dialog.dismiss();
@@ -289,26 +380,115 @@ public final class MainActivity extends ComponentActivity {
 
     private void navigateBack() {
         if (job != null) return;
-        if (screen == Screen.WORD || screen == Screen.EXCEL) {
-            if (screen != Screen.WORD || saveWordDraft(true)) {
-                screen = Screen.EDITOR;
-                render();
+        switch (screen) {
+            case WORD, EXCEL -> {
+                if (screen == Screen.WORD && !saveWordDraft(true)) return;
+                screen = reviewReturn;
             }
-        } else if (screen == Screen.EDITOR) {
-            finishEditor();
-        } else if (screen == Screen.SEARCH) {
-            screen = Screen.LIBRARY;
-            render();
-        } else if (screen == Screen.PDF || screen == Screen.TOOLS || screen == Screen.FOLDER) {
-            screen = screen == Screen.PDF ? pdfReturn : screen == Screen.TOOLS ? toolsReturn : Screen.TOOLS;
-            if (screen == Screen.EDITOR && document == null) screen = Screen.LIBRARY;
-            render();
+            case EDITOR -> {
+                if (!saveCrop(true)) return;
+                if (cropping && !batchEditing) {
+                    cropping = false;
+                    pendingCrop = null;
+                } else {
+                    if (batchEditing) clearBatch();
+                    screen = editorReturn;
+                    if (screen == Screen.DETAIL && document == null) screen = detailReturn;
+                }
+            }
+            case DETAIL -> screen = detailReturn;
+            case SEARCH -> screen = searchReturn;
+            case FILES -> {
+                if (selectingFiles) {
+                    stopFileSelection();
+                    return;
+                }
+                screen = Screen.LIBRARY;
+            }
+            case PDF -> screen = pdfReturn;
+            case TOOLS -> {
+                screen = toolsReturn;
+                if (toolsResumeCapture) {
+                    resumeParkedCapture();
+                    return;
+                }
+            }
+            default -> screen = Screen.LIBRARY;
         }
+        if (screen == Screen.SEARCH) searchResults = null;
+        remember();
+        render();
+    }
+
+    private void clearBatch() {
+        batchEditing = false;
+        batchAction = ImageTool.EDIT;
+        cropping = false;
+        pendingCrop = null;
+    }
+
+    private View withNavigation(View content) {
+        LinearLayout layout = ui.vertical();
+        layout.addView(content, new LinearLayout.LayoutParams(ui.match(), 0, 1));
+        layout.addView(ui.rule());
+        LinearLayout bar = ui.horizontal();
+        bar.setPadding(ui.dp(14), ui.dp(4), ui.dp(14), ui.dp(3));
+        bar.setBackgroundColor(ScanUi.WHITE);
+        for (Screen destination : new Screen[]{Screen.LIBRARY, Screen.FILES, Screen.TOOLS}) {
+            String label = destination == Screen.LIBRARY ? "首页" : destination == Screen.FILES ? "文件" : "工具";
+            int symbol = destination == Screen.LIBRARY ? R.drawable.ic_scan
+                    : destination == Screen.FILES ? R.drawable.ic_document : R.drawable.ic_tools;
+            boolean active = screen == destination;
+            int tint = active ? ScanUi.ACCENT : ScanUi.SECONDARY;
+
+            LinearLayout tab = ui.vertical();
+            tab.setGravity(Gravity.CENTER);
+            tab.setMinimumHeight(ui.dp(48));
+            tab.setPadding(0, ui.dp(2), 0, ui.dp(2));
+            tab.setBackground(ui.ripple(0, 10, 0));
+            tab.setContentDescription(label);
+            tab.setFocusable(true);
+            tab.setSelected(active);
+            tab.setOnClickListener(v -> {
+                if (screen == destination) return;
+                if (destination == Screen.TOOLS) toolsReturn = Screen.LIBRARY;
+                selectingFiles = false;
+                selectedFiles.clear();
+                screen = destination;
+                render();
+            });
+
+            FrameLayout iconSpot = new FrameLayout(this);
+            if (active) iconSpot.setBackground(ui.panel(ScanUi.ACCENT_SOFT, 14, 0));
+            iconSpot.addView(pageIcon(symbol, tint), new FrameLayout.LayoutParams(ui.dp(19), ui.dp(19), Gravity.CENTER));
+            tab.addView(iconSpot, new LinearLayout.LayoutParams(ui.dp(46), ui.dp(23)));
+            TextView tabLabel = ui.text(label, 12, tint);
+            tabLabel.setGravity(Gravity.CENTER);
+            tabLabel.setPadding(0, ui.dp(2), 0, 0);
+            tabLabel.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            tab.addView(tabLabel);
+            bar.addView(tab, new LinearLayout.LayoutParams(0, ui.wrap(), 1));
+        }
+        layout.addView(bar);
+        return layout;
+    }
+
+    private ImageView pageIcon(int drawable, int tint) {
+        ImageView icon = new ImageView(this);
+        icon.setImageResource(drawable);
+        icon.setImageTintList(ColorStateList.valueOf(tint));
+        icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        return icon;
     }
 
     private void render() {
         back.setEnabled(screen != Screen.LIBRARY);
         contentGeneration++;
+        if (fileScroll != null) {
+            fileOffset = fileScroll.getScrollY();
+            fileScroll = null;
+        }
         editor = null;
         tableGrid = null;
         pendingCells = null;
@@ -321,6 +501,8 @@ public final class MainActivity extends ComponentActivity {
         View view;
         switch (screen) {
             case EDITOR: view = editor(); break;
+            case DETAIL: view = documentDetail(); break;
+            case FILES: view = library(); break;
             case WORD: view = wordEditor(); break;
             case EXCEL: view = tableEditor(); break;
             case PDF: view = pdfEditor(); break;
@@ -329,77 +511,403 @@ public final class MainActivity extends ComponentActivity {
             case SEARCH: view = searchScreen(); break;
             default: view = library();
         }
+        if (screen == Screen.LIBRARY || screen == Screen.FILES || screen == Screen.TOOLS) {
+            view = withNavigation(view);
+        }
+        if (job == null && toolsResumeCapture && screen != Screen.TOOLS && screen != Screen.EDITOR
+                && screen != Screen.WORD && screen != Screen.EXCEL && screen != Screen.PDF) {
+            LinearLayout resume = ui.vertical();
+            resume.addView(ui.quietButton("返回拍摄", ScanUi.ACCENT, this::resumeParkedCapture));
+            resume.addView(view, new LinearLayout.LayoutParams(ui.match(), 0, 1));
+            view = resume;
+        }
+        if (job == null && preferences.contains(INCOMING_FILES)) {
+            LinearLayout recovery = ui.vertical();
+            recovery.addView(ui.quietButton("恢复待导入的拍摄批次", ScanUi.ACCENT, this::offerCaptureRecovery));
+            recovery.addView(view, new LinearLayout.LayoutParams(ui.match(), 0, 1));
+            view = recovery;
+        }
         root.removeAllViews();
         root.addView(view, new FrameLayout.LayoutParams(ui.match(), ui.match()));
     }
 
     private View library() {
+        boolean home = screen == Screen.LIBRARY;
         LinearLayout layout = ui.vertical();
         layout.setGravity(Gravity.CENTER_HORIZONTAL);
-        boolean browsingFolder = screen == Screen.FOLDER;
         int maxWidth = getResources().getConfiguration().screenWidthDp >= 600 ? ui.dp(568) : ui.match();
-        layout.addView(browsingFolder ? ui.header(folder.label, this::navigateBack, null, null)
-                : libraryHeader(), new LinearLayout.LayoutParams(browsingFolder ? ui.match() : maxWidth, ui.wrap()));
-
+        layout.addView(selectingFiles && !home ? fileSelectionHeader() : libraryHeader(),
+                new LinearLayout.LayoutParams(maxWidth, ui.wrap()));
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
-        scroll.setVerticalScrollBarEnabled(false);
         LinearLayout files = ui.vertical();
-        files.setPadding(ui.dp(24), ui.dp(4), ui.dp(24), ui.dp(24));
+        files.setPadding(ui.dp(20), ui.dp(4), ui.dp(20), ui.dp(18));
         scroll.addView(files, new ScrollView.LayoutParams(maxWidth, ui.wrap(), Gravity.CENTER_HORIZONTAL));
         layout.addView(scroll, new LinearLayout.LayoutParams(ui.match(), 0, 1));
-        if (!browsingFolder) files.addView(homeActions());
-
-        List<ScanDocument> recent;
-        List<String> unreadable = new ArrayList<>();
-        try {
-            recent = store.list(unreadable);
-        } catch (IOException failure) {
-            recent = new ArrayList<>();
-            toast("无法读取本机扫描件");
-        }
-        if (browsingFolder) recent.removeIf(item -> item.folder != folder);
-        if (!unreadable.isEmpty()) {
-            TextView warning = ui.text(unreadable.size() + " 份扫描件暂时无法读取。文件仍保存在本机。",
-                    13, ScanUi.SECONDARY);
-            warning.setPadding(0, ui.dp(14), 0, ui.dp(6));
-            files.addView(warning);
-        }
-
-        if (!browsingFolder || !recent.isEmpty()) {
-            LinearLayout section = ui.horizontal();
-            section.setPadding(0, ui.dp(browsingFolder ? 8 : 19), 0, ui.dp(2));
-            TextView heading = ui.heading(browsingFolder ? "扫描件" : "最近扫描", 19);
-            heading.setAccessibilityHeading(true);
-            section.addView(heading, new LinearLayout.LayoutParams(0, ui.wrap(), 1));
-            if (!browsingFolder) {
-                Button pdf = ui.quietButton("PDF 工作台", ScanUi.ACCENT, () -> openPdf(PdfTool.OPEN));
-                pdf.setTextSize(13);
-                pdf.setPadding(ui.dp(7), 0, 0, 0);
-                pdf.setContentDescription("打开 PDF 工作台");
-                addButtonIcon(pdf, R.drawable.ic_next, ScanUi.ACCENT, true);
-                section.addView(pdf);
+        if (home) {
+            files.addView(homeActions());
+        } else {
+            fileScroll = scroll;
+            scroll.post(() -> scroll.scrollTo(0, fileOffset));
+            if (!selectingFiles) {
+                HorizontalScrollView filters = new HorizontalScrollView(this);
+                filters.setHorizontalScrollBarEnabled(false);
+                LinearLayout options = ui.horizontal();
+                String[] labels = {"全部", "扫描件", "PDF", "识别稿", "已导出"};
+                for (FileFilter value : FileFilter.values()) {
+                    Button filter = ui.quietButton(labels[value.ordinal()],
+                            fileFilter == value ? ScanUi.ACCENT : ScanUi.SECONDARY, () -> {
+                                fileFilter = value;
+                                scroll.scrollTo(0, 0);
+                                render();
+                            });
+                    boolean active = fileFilter == value;
+                    filter.setTextSize(13);
+                    filter.setPadding(ui.dp(10), 0, ui.dp(10), 0);
+                    filter.setBackground(ui.ripple(active ? ScanUi.ACCENT_SOFT : 0, 14, 0));
+                    filter.setSelected(active);
+                    LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(ui.wrap(), ui.wrap());
+                    size.setMarginEnd(ui.dp(3));
+                    options.addView(filter, size);
+                }
+                filters.addView(options);
+                files.addView(filters);
+                if (fileFilter == FileFilter.PDF || fileFilter == FileFilter.ALL && !filterByFolder) addPdfLibrary(files);
+                if (fileFilter == FileFilter.EXPORTS) {
+                    addExportHistory(files);
+                    return layout;
+                }
+                if (fileFilter == FileFilter.PDF) return layout;
+                Button category = ui.quietButton("分类 · " + (filterByFolder ? folder.label : "全部"),
+                        ScanUi.SECONDARY, () -> chooseFileFolder(scroll));
+                category.setTextSize(13);
+                category.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+                category.setPadding(0, 0, ui.dp(12), 0);
+                files.addView(category, new LinearLayout.LayoutParams(ui.wrap(), ui.wrap()));
             }
+        }
+        List<String> unreadable = new ArrayList<>();
+        List<ScanDocument> scans;
+        try {
+            scans = store.list(unreadable);
+        } catch (IOException failure) {
+            scans = new ArrayList<>();
+            files.addView(ui.text("无法读取本机扫描件", 14, ScanUi.SECONDARY));
+        }
+        if (!unreadable.isEmpty()) files.addView(ui.text(unreadable.size() + " 份扫描件暂时无法读取",
+                14, ScanUi.SECONDARY));
+        if (!home && filterByFolder) scans.removeIf(item -> item.folder != folder);
+        if (!home && fileFilter == FileFilter.REVIEWS) scans.removeIf(item -> !hasReview(item));
+        if (home) {
+            int drafts = 0;
+            for (ScanDocument item : scans) {
+                if (drafts == 2) break;
+                if (!hasReview(item)) continue;
+                if (drafts++ == 0) {
+                    TextView heading = pageSectionHeading("继续处理");
+                    heading.setPadding(0, ui.dp(17), 0, ui.dp(2));
+                    files.addView(heading);
+                }
+                files.addView(libraryRow(item));
+            }
+            LinearLayout section = ui.horizontal();
+            section.setPadding(0, ui.dp(drafts > 0 ? 5 : 12), 0, 0);
+            section.addView(pageSectionHeading("最近打开"), new LinearLayout.LayoutParams(0, ui.wrap(), 1));
+            Button all = ui.quietButton("查看全部", ScanUi.ACCENT, () -> {
+                screen = Screen.FILES;
+                render();
+            });
+            all.setTextSize(13);
+            all.setPadding(ui.dp(9), 0, 0, 0);
+            section.addView(all);
             files.addView(section);
         }
-        if (recent.isEmpty()) {
-            TextView empty = ui.text(browsingFolder ? "可在扫描件的更多操作中移动到此分类"
-                    : "还没有扫描件", 14, ScanUi.SECONDARY);
-            empty.setPadding(0, ui.dp(14), 0, ui.dp(16));
-            files.addView(empty);
-        } else {
-            for (ScanDocument item : recent) {
-                files.addView(libraryRow(item), new LinearLayout.LayoutParams(ui.match(), ui.wrap()));
-                files.addView(ui.rule());
-            }
+        if (scans.isEmpty()) {
+            files.addView(ui.text(home ? "拍张纸，或导入已有图片" : "没有符合条件的扫描件", 14, ScanUi.SECONDARY));
+        }
+        for (int i = 0; i < (home ? Math.min(3, scans.size()) : scans.size()); i++) {
+            files.addView(libraryRow(scans.get(i)));
         }
         return layout;
     }
 
+    private void addPdfLibrary(LinearLayout files) {
+        List<PdfWorkspace.Page> available = pdfPages;
+        if (!pdfLoaded) {
+            try {
+                available = pdfStore.load();
+            } catch (IOException unreadable) {
+                files.addView(ui.text("暂时无法读取 PDF", 14, ScanUi.SECONDARY));
+            }
+        }
+        java.util.Map<String, Integer> pageCounts = new java.util.HashMap<>();
+        for (PdfWorkspace.Page page : available) pageCounts.merge(page.source, 1, Integer::sum);
+        Set<String> sources = new LinkedHashSet<>();
+        if (!pdfLoaded && !available.isEmpty()) {
+            pdfPages = available;
+            pdfLoaded = true;
+        }
+        for (PdfWorkspace.Page page : available) {
+            if (!sources.add(page.source)) continue;
+            files.addView(pdfLibraryRow(page.name, pageCounts.get(page.source), () -> {
+                openPdf(PdfTool.OPEN);
+                if (!pdfLoaded) return;
+                for (int i = 0; i < pdfPages.size(); i++) {
+                    if (pdfPages.get(i).source.equals(page.source)) {
+                        pdfPage = i;
+                        rememberPdfPosition();
+                        render();
+                        break;
+                    }
+                }
+            }));
+        }
+        if (fileFilter == FileFilter.PDF && available.isEmpty()) {
+            files.addView(ui.button("导入 PDF", false, () -> openPdf(PdfTool.ADD)));
+        }
+    }
+
+    private View pdfLibraryRow(String name, int pages, Runnable open) {
+        LinearLayout row = ui.horizontal();
+        row.setMinimumHeight(ui.dp(64));
+        row.setPadding(0, ui.dp(5), 0, ui.dp(5));
+        row.setBackground(ui.ripple(0, 8, 0));
+        row.setContentDescription(name);
+        if (Build.VERSION.SDK_INT >= 30) row.setStateDescription("PDF，" + pages + " 页");
+        row.setFocusable(true);
+        row.setOnClickListener(view -> open.run());
+
+        FrameLayout iconSpot = new FrameLayout(this);
+        iconSpot.setBackground(ui.panel(ScanUi.SURFACE, 7, ScanUi.LINE));
+        iconSpot.addView(pageIcon(R.drawable.ic_pdf, ScanUi.SECONDARY),
+                new FrameLayout.LayoutParams(ui.dp(20), ui.dp(20), Gravity.CENTER));
+        row.addView(iconSpot, new LinearLayout.LayoutParams(ui.dp(40), ui.dp(50)));
+
+        LinearLayout labels = ui.vertical();
+        labels.setPadding(ui.dp(11), ui.dp(3), ui.dp(6), ui.dp(3));
+        labels.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        TextView title = ui.heading(name, 15);
+        title.setMaxLines(2);
+        title.setEllipsize(TextUtils.TruncateAt.END);
+        labels.addView(title);
+        TextView metadata = ui.text("PDF · " + pages + " 页", 12, ScanUi.SECONDARY);
+        metadata.setPadding(0, ui.dp(4), 0, 0);
+        labels.addView(metadata);
+        row.addView(labels, new LinearLayout.LayoutParams(0, ui.wrap(), 1));
+
+        FrameLayout indicator = new FrameLayout(this);
+        indicator.addView(pageIcon(R.drawable.ic_next, ScanUi.SECONDARY),
+                new FrameLayout.LayoutParams(ui.dp(14), ui.dp(14), Gravity.CENTER));
+        row.addView(indicator, new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)));
+        return row;
+    }
+
+    private void addExportHistory(LinearLayout files) {
+        addExportHistory(files, null);
+    }
+
+    private void addExportHistory(LinearLayout files, String documentId) {
+        try {
+            List<ExportHistory.Entry> entries = exportHistory.list();
+            if (documentId != null) entries.removeIf(entry -> !documentId.equals(entry.documentId));
+            if (entries.isEmpty()) files.addView(ui.text("暂无导出记录", 14, ScanUi.SECONDARY));
+            int generation = contentGeneration;
+            for (ExportHistory.Entry entry : entries) {
+                Button record = ui.quietButton(entry.name, ScanUi.INK, () -> exportRecord(entry));
+                record.setTag(entry);
+                files.addView(record);
+                TextView location = ui.text(savedLocation(entry.uri) + " · " + formattedBytes(entry.bytes)
+                        + " · 检查可访问性…", 12, ScanUi.SECONDARY);
+                files.addView(location);
+                files.addView(ui.rule());
+                previews.execute(() -> {
+                    boolean available = canReadOutput(entry.uri);
+                    main.post(() -> {
+                        if (generation == contentGeneration) {
+                            location.setText(savedLocation(entry.uri) + " · " + formattedBytes(entry.bytes)
+                                    + (available ? "" : " · 文件不可访问"));
+                        }
+                    });
+                });
+            }
+        } catch (IOException unreadable) {
+            files.addView(ui.text("暂时无法读取导出记录", 14, ScanUi.SECONDARY));
+        }
+    }
+
+    private String savedLocation(Uri uri) {
+        if (android.provider.DocumentsContract.isDocumentUri(this, uri)) {
+            try {
+                String id = android.provider.DocumentsContract.getDocumentId(uri);
+                if ("com.android.externalstorage.documents".equals(uri.getAuthority()) && id.startsWith("primary:")) {
+                    return "本机存储/" + id.substring("primary:".length());
+                }
+                if ("com.android.providers.downloads.documents".equals(uri.getAuthority())) return "下载";
+            } catch (IllegalArgumentException invalidUri) {
+                // Other document providers may expose opaque IDs.
+            }
+        }
+        try {
+            return getPackageManager().resolveContentProvider(uri.getAuthority(), 0)
+                    .loadLabel(getPackageManager()).toString();
+        } catch (RuntimeException unavailable) {
+            return "所选文件位置";
+        }
+    }
+
+    private String formattedBytes(long bytes) {
+        return android.text.format.Formatter.formatShortFileSize(this, bytes);
+    }
+
+    private boolean canReadOutput(Uri uri) {
+        try (android.os.ParcelFileDescriptor handle = getContentResolver().openFileDescriptor(uri, "r")) {
+            return handle != null;
+        } catch (IOException | SecurityException unavailable) {
+            return false;
+        }
+    }
+
+    private void exportRecord(ExportHistory.Entry entry) {
+        FileFormat format;
+        try {
+            format = FileFormat.valueOf(entry.format);
+        } catch (IllegalArgumentException unsupported) {
+            error("此导出格式暂不支持重新打开", null);
+            return;
+        }
+        task("查看导出记录", false, state -> canReadOutput(entry.uri), available -> {
+            ScanSheet sheet = new ScanSheet(this, ui, entry.name);
+            sheet.detail(available ? savedLocation(entry.uri) + " · " + formattedBytes(entry.bytes)
+                    : "文件不可访问，可能已移动、删除或权限已失效。");
+            if (available) {
+                sheet.option(R.drawable.ic_document, "打开文件", null, false, () -> openOutput(entry.uri, format));
+                sheet.option(R.drawable.ic_share, "分享文件", null, false, () -> shareOutput(entry.uri, format));
+            }
+            if (entry.documentId != null) {
+                sheet.option(R.drawable.ic_scan, "查看关联原稿", null, false, () -> {
+                    try {
+                        ScanDocument source = store.load(entry.documentId);
+                        if (source == null) error("关联原稿已移除", null);
+                        else open(source);
+                    } catch (IOException unreadable) {
+                        error("无法打开关联原稿", null);
+                    }
+                });
+            }
+            sheet.option(R.drawable.ic_delete, "移除导出记录", "保留外部文件", false, () -> {
+                try {
+                    exportHistory.remove(entry.id);
+                    render();
+                } catch (IOException failure) {
+                    error("无法移除记录", null);
+                }
+            });
+            sheet.show();
+        }, null);
+    }
+
+    private void shareOutput(Uri uri, FileFormat format) {
+        Intent send = new Intent(Intent.ACTION_SEND).setType(format.mime).putExtra(Intent.EXTRA_STREAM, uri)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        send.setClipData(ClipData.newRawUri(null, uri));
+        try {
+            startActivity(Intent.createChooser(send, "分享文件"));
+        } catch (ActivityNotFoundException unavailable) {
+            error("没有可分享此文件的应用", null);
+        }
+    }
+
+    private void chooseFileFolder(ScrollView scroll) {
+        ScanSheet sheet = new ScanSheet(this, ui, "文件分类");
+        sheet.option(R.drawable.ic_document, "全部", null, !filterByFolder, () -> {
+            filterByFolder = false;
+            scroll.scrollTo(0, 0);
+            render();
+        });
+        for (ScanDocument.Folder value : ScanDocument.Folder.values()) {
+            sheet.option(R.drawable.ic_document, value.label, null, filterByFolder && folder == value, () -> {
+                folder = value;
+                filterByFolder = true;
+                scroll.scrollTo(0, 0);
+                render();
+            });
+        }
+        sheet.show();
+    }
+
+    private View fileSelectionHeader() {
+        LinearLayout header = ui.vertical();
+        header.addView(ui.header("已选 " + selectedFiles.size() + " 份", this::stopFileSelection,
+                "取消", this::stopFileSelection));
+        LinearLayout actions = ui.horizontal();
+        Button move = ui.button("移动分类", false, this::chooseBulkFolder);
+        Button remove = ui.button("删除", false, this::confirmBulkDelete);
+        move.setEnabled(!selectedFiles.isEmpty());
+        remove.setEnabled(!selectedFiles.isEmpty());
+        actions.addView(move, new LinearLayout.LayoutParams(0, ui.wrap(), 1));
+        actions.addView(remove, new LinearLayout.LayoutParams(0, ui.wrap(), 1));
+        header.addView(actions);
+        return header;
+    }
+
+    private void toggleFileSelection(ScanDocument item) {
+        selectingFiles = true;
+        if (!selectedFiles.add(item.id)) selectedFiles.remove(item.id);
+        render();
+    }
+
+    private void stopFileSelection() {
+        selectingFiles = false;
+        selectedFiles.clear();
+        render();
+    }
+
+    private void chooseBulkFolder() {
+        ScanSheet sheet = new ScanSheet(this, ui, "移动 " + selectedFiles.size() + " 份扫描件");
+        for (ScanDocument.Folder target : ScanDocument.Folder.values()) {
+            sheet.option(R.drawable.ic_document, target.label, null, false, () -> updateSelectedFiles(target));
+        }
+        sheet.show();
+    }
+
+    private void confirmBulkDelete() {
+        new AlertDialog.Builder(this).setTitle("删除所选的 " + selectedFiles.size() + " 份扫描件？")
+                .setMessage("将移除应用内的原图和校对稿。已导出的文件仍保留。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("删除", (dialog, which) -> updateSelectedFiles(null)).show();
+    }
+
+    private void updateSelectedFiles(ScanDocument.Folder folder) {
+        List<String> ids = new ArrayList<>(selectedFiles);
+        task(folder == null ? "删除扫描件" : "移动扫描件", false, state -> {
+            Set<String> failed = new LinkedHashSet<>();
+            for (String id : ids) {
+                try {
+                    ScanDocument item = store.load(id);
+                    if (item == null) continue;
+                    if (folder == null) store.delete(item);
+                    else store.save(item.filed(folder));
+                } catch (IOException failure) {
+                    failed.add(id);
+                }
+            }
+            return failed;
+        }, failed -> {
+            selectedFiles.retainAll(failed);
+            selectingFiles = !failed.isEmpty();
+            if (document != null && ids.contains(document.id) && !failed.contains(document.id)) {
+                document = folder == null ? null : document.filed(folder);
+                remember();
+            }
+            render();
+            if (!failed.isEmpty()) error(failed.size() + " 份扫描件未能处理，可重试所选扫描件", null);
+        }, null);
+    }
+
     private View libraryHeader() {
         LinearLayout bar = ui.horizontal();
-        bar.setPadding(ui.dp(24), ui.dp(14), ui.dp(24), ui.dp(13));
-        TextView title = ui.display(getString(R.string.app_name), 31);
+        bar.setPadding(ui.dp(21), ui.dp(8), ui.dp(16), ui.dp(5));
+        TextView title = ui.display(screen == Screen.LIBRARY ? getString(R.string.app_name) : "文件", 27);
         title.setAccessibilityHeading(true);
         title.setMaxLines(1);
         title.setEllipsize(TextUtils.TruncateAt.END);
@@ -410,137 +918,228 @@ public final class MainActivity extends ComponentActivity {
             searchInput = "";
             searchQuery = "";
             searchResults = null;
+            searchReturn = screen;
             screen = Screen.SEARCH;
             render();
         }), new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)));
-        Button tools = ui.quietButton("全部工具", ScanUi.INK, this::showTools);
-        tools.setTextSize(13);
-        tools.setPadding(ui.dp(7), 0, 0, 0);
-        addButtonIcon(tools, R.drawable.ic_tools, ScanUi.SECONDARY, false);
-        bar.addView(tools);
+        if (screen == Screen.FILES) {
+            bar.addView(ui.icon(R.drawable.ic_add, "新建或导入", this::newMaterial),
+                    new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)));
+            Button settings = ui.quietButton("设置", ScanUi.INK, this::settings);
+            settings.setTextSize(13);
+            settings.setPadding(ui.dp(8), 0, ui.dp(8), 0);
+            bar.addView(settings);
+        }
         return bar;
+    }
+
+    private void newMaterial() {
+        ScanSheet sheet = new ScanSheet(this, ui, "新建或导入");
+        sheet.option(R.drawable.ic_camera, "拍照扫描", null, false, this::startScanCamera);
+        sheet.option(R.drawable.ic_gallery, "导入照片", null, false, this::pick);
+        sheet.option(R.drawable.ic_pdf, "导入 PDF", null, false, () -> openPdf(PdfTool.ADD));
+        sheet.show();
+    }
+
+    private void settings() {
+        String version;
+        try {
+            version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (android.content.pm.PackageManager.NameNotFoundException unavailable) {
+            version = "";
+        }
+        ScanSheet sheet = new ScanSheet(this, ui, "设置");
+        sheet.detail("页光相机 " + version);
+        sheet.option(R.drawable.ic_document, "本机存储", "原稿和校对稿保存在应用内", false,
+                () -> textResult("本机存储", "原稿和校对稿保存在本机应用内。导出的位置由系统文件选择器指定。"));
+        sheet.option(R.drawable.ic_camera, "权限与隐私", "相机、选图和保存", false,
+                () -> textResult("权限与隐私", "相机仅在拍摄时使用。也可以通过系统选择器导入照片或 PDF。"
+                        + "扫描与识别均在本机处理。"));
+        sheet.option(R.drawable.ic_pdf, "默认 PDF 页面尺寸", defaultA4() ? "A4 纸张" : "图片比例",
+                false, () -> chooseExportDefault(true));
+        sheet.option(R.drawable.ic_image, "默认图片格式", defaultPng() ? "PNG" : "JPG",
+                false, () -> chooseExportDefault(false));
+        sheet.option(R.drawable.ic_document, "开源许可证", null, false, this::openLicenses);
+        sheet.show();
+    }
+
+    private boolean defaultA4() {
+        return preferences.getBoolean(DEFAULT_A4, true);
+    }
+
+    private boolean defaultPng() {
+        return preferences.getBoolean(DEFAULT_PNG, false);
+    }
+
+    private void chooseExportDefault(boolean pdf) {
+        boolean first = pdf ? defaultA4() : !defaultPng();
+        String[] options = pdf ? new String[]{"A4 纸张", "图片比例"} : new String[]{"JPG", "PNG"};
+        new AlertDialog.Builder(this).setTitle(pdf ? "默认 PDF 页面尺寸" : "默认图片格式")
+                .setSingleChoiceItems(options, first ? 0 : 1, (view, which) -> {})
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存", (view, which) -> {
+                    int checked = ((AlertDialog) view).getListView().getCheckedItemPosition();
+                    preferences.edit().putBoolean(pdf ? DEFAULT_A4 : DEFAULT_PNG,
+                            pdf ? checked == 0 : checked == 1).apply();
+                    settings();
+                }).show();
+    }
+
+    private void openLicenses() {
+        try {
+            String[] licenses = getAssets().list("licenses");
+            if (licenses == null || licenses.length == 0) return;
+            new AlertDialog.Builder(this).setTitle("开源许可证").setItems(licenses, (dialog, index) -> {
+                String name = licenses[index];
+                task("打开许可证", false, state -> {
+                    try (java.io.InputStream input = getAssets().open("licenses/" + name);
+                            java.io.ByteArrayOutputStream text = new java.io.ByteArrayOutputStream()) {
+                        byte[] buffer = new byte[8192];
+                        for (int size; (size = input.read(buffer)) != -1; ) text.write(buffer, 0, size);
+                        return text.toString("UTF-8");
+                    }
+                }, text -> textResult(name, name.endsWith(".html") ? android.text.Html.fromHtml(text,
+                        android.text.Html.FROM_HTML_MODE_LEGACY).toString() : text), null);
+            }).setNegativeButton("关闭", null).show();
+        } catch (IOException unavailable) {
+            error("暂时无法读取许可证", null);
+        }
     }
 
     private View homeActions() {
         LinearLayout actions = ui.vertical();
-        actions.addView(ui.rule());
         LinearLayout scan = ui.horizontal();
-        scan.setMinimumHeight(ui.dp(134));
-        scan.setPadding(0, ui.dp(13), ui.dp(4), ui.dp(13));
-        scan.setBackground(ui.ripple(0, 8, 0));
+        scan.setMinimumHeight(ui.dp(101));
+        scan.setPadding(ui.dp(17), ui.dp(15), ui.dp(14), ui.dp(15));
+        scan.setBackground(ui.ripple(ScanUi.INK, 15, 0));
         scan.setContentDescription("拍照扫描");
         scan.setFocusable(true);
-        scan.setOnClickListener(v -> capture());
+        scan.setOnClickListener(v -> startScanCamera());
+
         LinearLayout labels = ui.vertical();
         labels.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-        labels.addView(ui.heading("拍照扫描", 25));
-        TextView detail = ui.text("单页或连拍，自动裁边", 13, ScanUi.SECONDARY);
-        detail.setPadding(0, ui.dp(10), 0, 0);
+        TextView title = ui.heading("拍照扫描", 21);
+        title.setTextColor(ScanUi.WHITE);
+        labels.addView(title);
+        TextView detail = ui.text("连续拍摄，逐页校正", 13, 0xffddd4cc);
+        detail.setPadding(0, ui.dp(7), 0, 0);
         labels.addView(detail);
         LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(0, ui.wrap(), 1);
         labelParams.setMarginEnd(ui.dp(10));
         scan.addView(labels, labelParams);
-        FrameLayout ring = new FrameLayout(this);
-        ring.setBackground(ui.panel(0, 44, ScanUi.ACCENT));
-        ImageView camera = new ImageView(this);
-        camera.setImageResource(R.drawable.ic_camera);
-        camera.setImageTintList(ColorStateList.valueOf(ScanUi.PAPER));
-        camera.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        camera.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        camera.setPadding(ui.dp(17), ui.dp(17), ui.dp(17), ui.dp(17));
-        camera.setBackground(ui.panel(ScanUi.INK, 44, 0));
-        ring.addView(camera, new FrameLayout.LayoutParams(ui.dp(62), ui.dp(62), Gravity.CENTER));
-        scan.addView(ring, new LinearLayout.LayoutParams(ui.dp(74), ui.dp(74)));
-        actions.addView(scan, new LinearLayout.LayoutParams(ui.match(), ui.wrap()));
-        actions.addView(ui.rule());
 
-        LinearLayout shortcuts = ui.horizontal();
-        shortcuts.addView(homeShortcut(R.drawable.ic_gallery, "相册导入", "从相册导入", this::pick),
-                new LinearLayout.LayoutParams(0, ui.wrap(), 1));
-        shortcuts.addView(homeDivider());
-        shortcuts.addView(homeShortcut(R.drawable.ic_add, "导入 PDF", "导入 PDF", () -> openPdf(PdfTool.ADD)),
-                new LinearLayout.LayoutParams(0, ui.wrap(), 1));
-        actions.addView(shortcuts, new LinearLayout.LayoutParams(ui.match(), ui.wrap()));
-        actions.addView(ui.rule());
+        FrameLayout iconSpot = new FrameLayout(this);
+        iconSpot.setBackground(ui.panel(0xff453e36, 14, 0));
+        iconSpot.addView(pageIcon(R.drawable.ic_camera, ScanUi.PAPER),
+                new FrameLayout.LayoutParams(ui.dp(24), ui.dp(24), Gravity.CENTER));
+        scan.addView(iconSpot, new LinearLayout.LayoutParams(ui.dp(47), ui.dp(47)));
+        actions.addView(scan, new LinearLayout.LayoutParams(ui.match(), ui.wrap()));
+
+        View importPhotos = actionTile(R.drawable.ic_gallery, "导入照片", "从相册导入", false, this::pick);
+        View pdf = actionTile(R.drawable.ic_pdf, "打开 PDF", "打开 PDF", false, () -> openPdf(PdfTool.OPEN));
+        addActionRow(actions, importPhotos, pdf, 9);
+        View words = actionTile(R.drawable.ic_text, "提取文字", "提取文字", true, () -> startCamera(ImageTool.WORD));
+        View tables = actionTile(R.drawable.ic_table, "提取表格", "提取表格", true, () -> startCamera(ImageTool.TABLE));
+        addActionRow(actions, words, tables, 7);
         return actions;
     }
 
-    private View homeShortcut(int drawable, String title, String description, Runnable action) {
+    private void addActionRow(LinearLayout parent, View first, View second, int topGap) {
+        LinearLayout row = ui.horizontal();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams left = new LinearLayout.LayoutParams(0, ui.wrap(), 1);
+        left.setMarginEnd(ui.dp(8));
+        row.addView(first, left);
+        row.addView(second, new LinearLayout.LayoutParams(0, ui.wrap(), 1));
+        LinearLayout.LayoutParams rowSize = new LinearLayout.LayoutParams(ui.match(), ui.wrap());
+        rowSize.topMargin = ui.dp(topGap);
+        parent.addView(row, rowSize);
+    }
+
+    private View actionTile(int drawable, String title, String description, boolean emphasized, Runnable action) {
         LinearLayout item = ui.horizontal();
-        item.setGravity(Gravity.CENTER);
-        item.setMinimumHeight(ui.dp(54));
-        item.setPadding(ui.dp(8), ui.dp(7), ui.dp(8), ui.dp(7));
-        item.setBackground(ui.ripple(0, 6, 0));
+        item.setMinimumHeight(ui.dp(51));
+        item.setPadding(ui.dp(11), ui.dp(8), ui.dp(8), ui.dp(8));
+        item.setBackground(ui.ripple(emphasized ? ScanUi.ACCENT_SOFT : ScanUi.SURFACE, 10, 0));
         item.setContentDescription(description);
         item.setFocusable(true);
         item.setOnClickListener(v -> action.run());
-
-        ImageView icon = new ImageView(this);
-        icon.setImageResource(drawable);
-        icon.setImageTintList(ColorStateList.valueOf(ScanUi.SECONDARY));
-        icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         LinearLayout.LayoutParams iconSize = new LinearLayout.LayoutParams(ui.dp(18), ui.dp(18));
-        iconSize.setMarginEnd(ui.dp(7));
-        item.addView(icon, iconSize);
+        iconSize.setMarginEnd(ui.dp(8));
+        item.addView(pageIcon(drawable, emphasized ? ScanUi.ACCENT : ScanUi.SECONDARY), iconSize);
         TextView label = ui.text(title, 14, ScanUi.INK);
         label.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        item.addView(label, new LinearLayout.LayoutParams(ui.wrap(), ui.wrap()));
+        item.addView(label, new LinearLayout.LayoutParams(0, ui.wrap(), 1));
         return item;
     }
 
-    private void addButtonIcon(Button button, int source, int tint, boolean trailing) {
-        Drawable icon = getDrawable(source).mutate();
-        int size = ui.dp(17);
-        icon.setBounds(0, 0, size, size);
-        icon.setTint(tint);
-        button.setCompoundDrawablePadding(ui.dp(6));
-        button.setCompoundDrawablesRelative(trailing ? null : icon, null, trailing ? icon : null, null);
-    }
-
-    private View homeDivider() {
-        View divider = new View(this);
-        divider.setBackgroundColor(ScanUi.LINE);
-        divider.setLayoutParams(new LinearLayout.LayoutParams(ui.dp(1), ui.dp(21)));
-        return divider;
+    private TextView pageSectionHeading(String label) {
+        TextView heading = ui.heading(label, 16);
+        heading.setAccessibilityHeading(true);
+        return heading;
     }
 
     private View libraryRow(ScanDocument item) {
         LinearLayout row = ui.horizontal();
-        row.setPadding(0, ui.dp(12), 0, ui.dp(12));
+        row.setPadding(0, ui.dp(5), 0, ui.dp(5));
         ImageView thumb = new ImageView(this);
         thumb.setImageResource(R.drawable.ic_document);
         thumb.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        thumb.setBackground(ui.panel(ScanUi.SURFACE, 5, ScanUi.LINE));
+        thumb.setBackground(ui.panel(ScanUi.SURFACE, 7, ScanUi.LINE));
         thumb.setClipToOutline(true);
         thumb.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        row.addView(thumb, new LinearLayout.LayoutParams(ui.dp(43), ui.dp(55)));
+        row.addView(thumb, new LinearLayout.LayoutParams(ui.dp(40), ui.dp(50)));
         if (!item.pages.isEmpty()) {
             loadImage(item, item.pages.get(0), false, true, bitmap -> {
                 if (bitmap != null) thumb.setImageBitmap(bitmap);
             });
         }
         LinearLayout label = ui.vertical();
-        label.setPadding(ui.dp(12), ui.dp(6), ui.dp(6), ui.dp(6));
+        label.setPadding(ui.dp(11), ui.dp(3), ui.dp(6), ui.dp(3));
+        label.setMinimumHeight(ui.dp(48));
+        label.setGravity(Gravity.CENTER_VERTICAL);
         label.setFocusable(true);
         String displayName = DEFAULT_SCAN_NAME.matcher(item.name).replaceFirst("扫描件 $1/$2 $3:$4");
         TextView name = ui.heading(displayName, 15);
-        name.setMaxLines(1);
+        name.setMaxLines(2);
         name.setEllipsize(TextUtils.TruncateAt.END);
         label.addView(name);
-        String date = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, Locale.CHINA)
-                .format(new Date(item.modifiedAt));
+        String date = new SimpleDateFormat("M/d HH:mm", Locale.CHINA).format(new Date(item.modifiedAt));
         String detail = item.pages.size() + " 页";
-        if (!DEFAULT_SCAN_NAME.matcher(item.name).matches()) detail += "  ·  " + date;
-        else if (item.folder != ScanDocument.Folder.NONE) detail += "  ·  " + item.folder.label;
+        detail += "  ·  " + date;
+        if (item.folder != ScanDocument.Folder.NONE) detail += "  ·  " + item.folder.label;
+        if (hasReview(item)) detail += "  ·  有识别稿";
         TextView metadata = ui.text(detail, 12, ScanUi.SECONDARY);
-        metadata.setPadding(0, ui.dp(5), 0, 0);
+        metadata.setPadding(0, ui.dp(4), 0, 0);
         label.addView(metadata);
         label.setContentDescription(item.name + "，" + item.pages.size() + " 页");
-        label.setOnClickListener(v -> open(item));
-        thumb.setOnClickListener(v -> open(item));
+        boolean filePage = screen == Screen.FILES;
+        View.OnClickListener openOrSelect = v -> {
+            if (filePage && selectingFiles) toggleFileSelection(item);
+            else open(item);
+        };
+        label.setOnClickListener(openOrSelect);
+        thumb.setOnClickListener(openOrSelect);
+        View.OnLongClickListener select = v -> {
+            if (filePage) toggleFileSelection(item);
+            else documentMenu(item);
+            return true;
+        };
+        label.setOnLongClickListener(select);
+        thumb.setOnLongClickListener(select);
         row.addView(label, new LinearLayout.LayoutParams(0, ui.wrap(), 1));
-        row.addView(ui.icon(R.drawable.ic_more, item.name + "的更多操作", () -> documentMenu(item)),
-                new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)));
+        if (filePage && selectingFiles) {
+            CheckBox picked = new CheckBox(this);
+            picked.setContentDescription("选择 " + item.name);
+            picked.setChecked(selectedFiles.contains(item.id));
+            picked.setOnClickListener(v -> toggleFileSelection(item));
+            row.addView(picked, new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)));
+        } else {
+            ImageView more = ui.icon(R.drawable.ic_more, item.name + "的更多操作", () -> documentMenu(item));
+            more.setPadding(ui.dp(15), ui.dp(15), ui.dp(15), ui.dp(15));
+            more.setImageTintList(ColorStateList.valueOf(ScanUi.SECONDARY));
+            row.addView(more, new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)));
+        }
         return row;
     }
 
@@ -548,11 +1147,17 @@ public final class MainActivity extends ComponentActivity {
         ScanSheet sheet = new ScanSheet(this, ui, item.name);
         sheet.option(R.drawable.ic_edit, "重命名", null, false, () -> rename(item));
         sheet.option(R.drawable.ic_document, "移动到分类", item.folder.label, false, () -> fileDocument(item));
+        sheet.option(R.drawable.ic_document, "查看关联结果", null, false, () -> linkedExports(item));
         sheet.option(R.drawable.ic_delete, "删除扫描件", null, false, () -> new AlertDialog.Builder(this)
                 .setTitle("删除扫描件？").setMessage("将删除本应用里的原图及编辑记录。已导出的文件仍可使用。")
                 .setNegativeButton("取消", null).setPositiveButton("删除", (dialog, which) -> {
                     try {
                         store.delete(item);
+                        if (document != null && document.id.equals(item.id)) {
+                            document = null;
+                            if (screen == Screen.DETAIL) screen = detailReturn;
+                            remember();
+                        }
                         render();
                     } catch (IOException failure) {
                         error("无法删除扫描件", null);
@@ -561,12 +1166,35 @@ public final class MainActivity extends ComponentActivity {
         sheet.show();
     }
 
+    private void linkedExports(ScanDocument item) {
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout records = ui.vertical();
+        records.setPadding(ui.dp(18), 0, ui.dp(18), ui.dp(10));
+        addExportHistory(records, item.id);
+        scroll.addView(records);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("关联导出结果")
+                .setView(scroll).setPositiveButton("关闭", null).create();
+        for (int i = 0; i < records.getChildCount(); i++) {
+            View child = records.getChildAt(i);
+            if (child instanceof Button button) {
+                View.OnClickListener openRecord = v -> {
+                    dialog.dismiss();
+                    if (button.getTag() instanceof ExportHistory.Entry entry) exportRecord(entry);
+                };
+                button.setOnClickListener(openRecord);
+            }
+        }
+        dialog.show();
+    }
+
     private void fileDocument(ScanDocument item) {
         ScanSheet folders = new ScanSheet(this, ui, "移动到分类");
         for (ScanDocument.Folder destination : ScanDocument.Folder.values()) {
             folders.option(R.drawable.ic_document, destination.label, null, item.folder == destination, () -> {
                 try {
-                    store.save(item.filed(destination));
+                    ScanDocument filed = item.filed(destination);
+                    store.save(filed);
+                    if (document != null && document.id.equals(item.id)) document = filed;
                     render();
                 } catch (IOException failure) {
                     error("无法更新分类，请检查本机存储", null);
@@ -578,69 +1206,103 @@ public final class MainActivity extends ComponentActivity {
 
     private void showTools() {
         toolsScrollY = 0;
-        toolsReturn = screen == Screen.EDITOR ? Screen.EDITOR : Screen.LIBRARY;
+        toolsReturn = screen;
         screen = Screen.TOOLS;
         render();
     }
 
     private View tools() {
-        ToolShelf shelf = new ToolShelf(this, ui, this::navigateBack);
-        shelf.section("扫描", "扫描与识别",
-                new ToolShelf.Item("扫描文件", R.drawable.ic_scan, this::capture),
-                imageTile("扫描证件", R.drawable.ic_id, ImageTool.ID),
-                imageTile("提取文字", R.drawable.ic_text, ImageTool.WORD),
-                imageTile("手写识别", R.drawable.ic_edit, ImageTool.HANDWRITING),
-                imageTile("提取表格", R.drawable.ic_table, ImageTool.TABLE),
-                imageTile("手写转 Excel", R.drawable.ic_table, ImageTool.HAND_TABLE),
-                imageTile("书页拆分", R.drawable.ic_crop, ImageTool.BOOK),
-                imageTile("书页展平", R.drawable.ic_document, ImageTool.FLATTEN),
-                imageTile("拍屏去彩纹", R.drawable.ic_camera, ImageTool.SCREEN),
-                imageTile("读二维码", R.drawable.ic_qr, ImageTool.QR));
-        shelf.section("PDF", "PDF 工具",
-                pdfTile("PDF 阅读", R.drawable.ic_pdf, PdfTool.OPEN),
-                pdfTile("PDF 合并", R.drawable.ic_add, PdfTool.MERGE),
-                pdfTile("PDF 拆分", R.drawable.ic_crop, PdfTool.PAGES),
-                pdfTile("转图片", R.drawable.ic_image, PdfTool.IMAGES),
-                pdfTile("转 Word", R.drawable.ic_document, PdfTool.WORD),
-                pdfTile("转 Excel", R.drawable.ic_table, PdfTool.EXCEL),
-                pdfTile("提取文字", R.drawable.ic_text, PdfTool.TEXT),
-                pdfTile("转长图", R.drawable.ic_gallery, PdfTool.LONG),
-                pdfTile("PDF 压缩", R.drawable.ic_down, PdfTool.COMPRESS),
-                pdfTile("PDF 水印", R.drawable.ic_edit, PdfTool.WATERMARK),
-                pdfTile("PDF 手写签名", R.drawable.ic_edit, PdfTool.SIGN));
-        shelf.section("图文", "图文编辑",
+        ToolShelf shelf = new ToolShelf(this, ui, toolsResumeCapture ? this::navigateBack : null);
+        shelf.search(toolQuery, value -> toolQuery = value);
+        shelf.section("识别", "文字与表格",
+                new ToolShelf.Item("提取文字", R.drawable.ic_text, "校对正文并导出 Word", "手写 图片转文字",
+                        () -> imageToolPicker("提取文字", ImageTool.WORD)),
+                new ToolShelf.Item("提取表格", R.drawable.ic_table, "校对单元格并导出 Excel", "图片转表格 手写",
+                        () -> imageToolPicker("提取表格", ImageTool.TABLE)));
+        shelf.section("图片", "图片处理",
                 imageTile("图像矫正", R.drawable.ic_crop, ImageTool.CROP),
-                imageTile("书页展平", R.drawable.ic_document, ImageTool.FLATTEN),
                 imageTile("文档增强", R.drawable.ic_enhance, ImageTool.ENHANCE),
+                imageTile("证件复印件", R.drawable.ic_id, ImageTool.ID),
+                imageTile("证件照裁尺寸", R.drawable.ic_camera, ImageTool.PASSPORT),
+                new ToolShelf.Item("书页处理", R.drawable.ic_document, "拆分对开页或展平曲面", "书本 书页拆分 书页展平",
+                        () -> bookTools(false)),
+                imageTile("拍屏去彩纹", R.drawable.ic_camera, ImageTool.SCREEN),
                 imageTile("等比改尺寸", R.drawable.ic_image, ImageTool.RESIZE),
-                imageTile("证件照裁切", R.drawable.ic_camera, ImageTool.PASSPORT),
                 imageTile("合并长图", R.drawable.ic_gallery, ImageTool.LONG),
+                new ToolShelf.Item("添加水印", R.drawable.ic_edit, "为图片或 PDF 添加水印", "",
+                        () -> chooseMarkSource(false)),
+                new ToolShelf.Item("手写签名", R.drawable.ic_edit, "在图片或 PDF 上放置手写签名", "",
+                        () -> chooseMarkSource(true)),
+                imageTile("手动消除", R.drawable.ic_enhance, ImageTool.REPAIR),
                 imageTile("提取线稿", R.drawable.ic_edit, ImageTool.LINE),
-                imageTile("图片水印", R.drawable.ic_edit, ImageTool.WATERMARK),
-                imageTile("图片手写签名", R.drawable.ic_edit, ImageTool.SIGN),
-                imageTile("手动消除", R.drawable.ic_enhance, ImageTool.REPAIR));
-        shelf.section("文件", "文件整理",
-                folderTile(ScanDocument.Folder.IDS), folderTile(ScanDocument.Folder.ALBUM),
-                folderTile(ScanDocument.Folder.MEETINGS), folderTile(ScanDocument.Folder.QUESTIONS),
-                folderTile(ScanDocument.Folder.MISTAKES));
+                imageTile("读二维码", R.drawable.ic_qr, ImageTool.QR));
+        shelf.section("PDF", "PDF 处理",
+                pdfTile("PDF 阅读", R.drawable.ic_pdf, PdfTool.OPEN),
+                new ToolShelf.Item("合并 PDF", R.drawable.ic_add, "组合多份 PDF 的选中页面", "拼PDF 拼 PDF PDF 合并",
+                        () -> openPdf(PdfTool.MERGE)),
+                pdfTile("拆分 PDF", R.drawable.ic_crop, PdfTool.PAGES),
+                pdfTile("PDF 转 Word", R.drawable.ic_document, PdfTool.WORD),
+                pdfTile("PDF 转 Excel", R.drawable.ic_table, PdfTool.EXCEL),
+                pdfTile("PDF 转图片", R.drawable.ic_image, PdfTool.IMAGES),
+                pdfTile("PDF 转长图", R.drawable.ic_gallery, PdfTool.LONG),
+                pdfTile("PDF 压缩", R.drawable.ic_down, PdfTool.COMPRESS));
         activeShelf = shelf;
         return shelf.view(toolsScrollY);
     }
 
-    private ToolShelf.Item folderTile(ScanDocument.Folder destination) {
-        return new ToolShelf.Item(destination.label, R.drawable.ic_document, () -> {
-            folder = destination;
-            screen = Screen.FOLDER;
-            render();
+    private void chooseMarkSource(boolean signature) {
+        String title = signature ? "手写签名" : "添加水印";
+        ScanSheet sheet = new ScanSheet(this, ui, title);
+        sheet.option(R.drawable.ic_image, "图片或扫描件", null, false,
+                () -> imageToolPicker(title, signature ? ImageTool.SIGN : ImageTool.WATERMARK));
+        sheet.option(R.drawable.ic_pdf, "PDF", null, false,
+                () -> openPdf(signature ? PdfTool.SIGN : PdfTool.WATERMARK));
+        sheet.show();
+    }
+
+    private void bookTools(boolean current) {
+        ScanSheet sheet = new ScanSheet(this, ui, "书页处理");
+        sheet.option(R.drawable.ic_crop, "拆分左右页", "把对开页另存为两页 PDF", false, () -> {
+            if (current) runImageTool(ImageTool.BOOK);
+            else imageToolPicker("书页拆分", ImageTool.BOOK);
         });
+        sheet.option(R.drawable.ic_document, "展平书页", "预览曲面修正，也可恢复原页", false, () -> {
+            if (current) runImageTool(ImageTool.FLATTEN);
+            else imageToolPicker("书页展平", ImageTool.FLATTEN);
+        });
+        sheet.show();
     }
 
     private ToolShelf.Item pdfTile(String label, int icon, PdfTool action) {
-        return new ToolShelf.Item(label, icon, () -> openPdf(action));
+        String detail = switch (action) {
+            case OPEN -> "导入并翻看 PDF";
+            case PAGES -> "把选中页分别保存为 PDF";
+            case WORD -> "校对正文后导出 Word";
+            case EXCEL -> "校对表格后导出 Excel";
+            case IMAGES -> "保存当前页或批量转为图片";
+            case LONG -> "把选中页拼成一张长图";
+            case COMPRESS -> "减小含有大图的 PDF";
+            default -> "";
+        };
+        return new ToolShelf.Item(label, icon, detail, "", () -> openPdf(action));
     }
 
     private ToolShelf.Item imageTile(String label, int icon, ImageTool action) {
-        return new ToolShelf.Item(label, icon, () -> imageToolPicker(label, action));
+        String detail = switch (action) {
+            case CROP -> "调整纸边与透视";
+            case ENHANCE -> "减淡阴影并增强清晰度";
+            case ID -> "把证件正反面排到一张 A4";
+            case PASSPORT -> "按一寸或二寸裁切照片";
+            case SCREEN -> "减淡拍摄屏幕产生的彩纹";
+            case RESIZE -> "按指定宽高调整图片";
+            case LONG -> "按页序纵向拼接图片";
+            case REPAIR -> "另存手动消除后的图片";
+            case LINE -> "另存黑白线条图";
+            case QR -> "读取并复制二维码内容";
+            default -> "";
+        };
+        return new ToolShelf.Item(label, icon, detail, action == ImageTool.ENHANCE ? "去阴影" : "",
+                () -> imageToolPicker(label, action));
     }
 
     private ScanDocument importTitle(ScanDocument scan, Uri source) {
@@ -669,7 +1331,9 @@ public final class MainActivity extends ComponentActivity {
                 return;
             }
             try {
-                store.save(item.renamed(name));
+                ScanDocument renamed = item.renamed(name);
+                store.save(renamed);
+                if (document != null && document.id.equals(item.id)) document = renamed;
                 dialog.dismiss();
                 render();
             } catch (IOException failure) {
@@ -684,15 +1348,182 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void open(ScanDocument item, String pageId) {
-        editorReturn = screen == Screen.FOLDER || screen == Screen.SEARCH || screen == Screen.TOOLS
-                ? screen : Screen.LIBRARY;
+        detailReturn = screen == Screen.DETAIL ? detailReturn : screen;
         document = item;
         selectedPage = pageId != null ? pageId : item.pages.isEmpty() ? null : item.pages.get(0).id;
-        cropping = false;
+        clearBatch();
+        reviewReturn = Screen.DETAIL;
+        screen = Screen.DETAIL;
+        remember();
+        render();
+    }
+
+    private void editFromDetail(boolean crop) {
+        editorReturn = Screen.DETAIL;
+        cropping = crop;
         pendingCrop = null;
         screen = Screen.EDITOR;
         remember();
         render();
+    }
+
+    private static final String[] REVIEW_KEYS = {ScanRecognition.WORD, ScanRecognition.HANDWRITING,
+            ScanRecognition.EXCEL, ScanRecognition.HAND_TABLE};
+
+    private boolean hasReview(ScanDocument scan) {
+        for (String key : REVIEW_KEYS) {
+            try {
+                if (store.loadReview(scan, key) != null || store.reviewIsOutdated(scan, key)) return true;
+            } catch (IOException | org.json.JSONException unreadable) {
+                // A damaged draft does not hide its source document.
+            }
+        }
+        return false;
+    }
+
+    private View documentDetail() {
+        if (document == null) return library();
+        LinearLayout layout = ui.vertical();
+        LinearLayout top = ui.horizontal();
+        top.setPadding(ui.dp(7), ui.dp(5), ui.dp(16), ui.dp(5));
+        top.addView(ui.icon(R.drawable.ic_back, "返回", this::navigateBack),
+                new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)));
+        TextView title = ui.heading(document.name, 21);
+        title.setAccessibilityHeading(true);
+        title.setMaxLines(2);
+        title.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams titleWidth = new LinearLayout.LayoutParams(0, ui.wrap(), 1f);
+        titleWidth.setMarginEnd(ui.dp(8));
+        top.addView(title, titleWidth);
+        Button export = ui.button("导出", true, this::showExportFormats);
+        export.setTextSize(14);
+        top.addView(export);
+        layout.addView(top);
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout body = ui.vertical();
+        body.setPadding(ui.dp(20), ui.dp(4), ui.dp(20), ui.dp(20));
+        int maxWidth = getResources().getConfiguration().screenWidthDp >= 600 ? ui.dp(568) : ui.match();
+        scroll.addView(body, new ScrollView.LayoutParams(maxWidth, ui.wrap(), Gravity.CENTER_HORIZONTAL));
+        layout.addView(scroll, new LinearLayout.LayoutParams(ui.match(), 0, 1));
+        String pdfSource = preferences.getString("pdfReviewSource/" + document.id, null);
+        String scanSource = preferences.getString(SUBSET_SOURCE + document.id, null);
+        if (scanSource != null) {
+            body.addView(ui.quietButton("打开原扫描件", ScanUi.ACCENT, () -> openSubsetSource(scanSource)));
+        }
+        LinearLayout meta = ui.horizontal();
+        String source = pdfSource == null ? "" : " · 原 PDF " + pdfSource;
+        TextView pageCount = ui.text(document.pages.size() + " 页" + source, 13, ScanUi.SECONDARY);
+        meta.addView(pageCount, new LinearLayout.LayoutParams(0, ui.wrap(), 1f));
+        meta.addView(ui.icon(R.drawable.ic_more, "更多操作", () -> documentMenu(document)),
+                new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)));
+        body.addView(meta);
+        addActionRow(body, actionTile(R.drawable.ic_edit, "编辑图片", "编辑图片", false, () -> editFromDetail(false)),
+                actionTile(R.drawable.ic_document, "管理页面", "管理页面", false, this::manageScanPages), 0);
+        addActionRow(body, actionTile(R.drawable.ic_text, "提取文字", "提取文字", true, () -> chooseRecognitionMode(false)),
+                actionTile(R.drawable.ic_table, "提取表格", "提取表格", true, () -> chooseRecognitionMode(true)), 7);
+        TextView pagesHeading = pageSectionHeading("扫描页");
+        pagesHeading.setPadding(0, ui.dp(20), 0, ui.dp(7));
+        body.addView(pagesHeading);
+        HorizontalScrollView strip = new HorizontalScrollView(this);
+        strip.setHorizontalScrollBarEnabled(false);
+        LinearLayout thumbnails = ui.horizontal();
+        for (int i = 0; i < document.pages.size(); i++) {
+            ScanDocument.Page page = document.pages.get(i);
+            int number = i + 1;
+            LinearLayout item = ui.vertical();
+            item.setGravity(Gravity.CENTER_HORIZONTAL);
+            item.setPadding(0, 0, 0, ui.dp(8));
+            item.setBackground(ui.ripple(0, 9, 0));
+            ImageView thumb = new ImageView(this);
+            thumb.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            thumb.setImageResource(R.drawable.ic_document);
+            thumb.setBackground(ui.panel(ScanUi.SURFACE, 8, ScanUi.LINE));
+            thumb.setClipToOutline(true);
+            item.addView(thumb, new LinearLayout.LayoutParams(ui.dp(65), ui.dp(82)));
+            TextView caption = ui.text("第 " + number + " 页", 12, ScanUi.SECONDARY);
+            caption.setPadding(0, ui.dp(5), 0, 0);
+            item.addView(caption);
+            loadImage(document, page, false, true, bitmap -> {
+                if (bitmap != null) thumb.setImageBitmap(bitmap);
+            });
+            item.setContentDescription("编辑第 " + number + " 页");
+            item.setFocusable(true);
+            item.setOnClickListener(v -> {
+                selectedPage = page.id;
+                editFromDetail(false);
+            });
+            LinearLayout.LayoutParams itemWidth = new LinearLayout.LayoutParams(ui.wrap(), ui.wrap());
+            itemWidth.setMarginEnd(ui.dp(9));
+            thumbnails.addView(item, itemWidth);
+        }
+        strip.addView(thumbnails);
+        body.addView(strip);
+        TextView reviewsHeading = pageSectionHeading("识别结果");
+        reviewsHeading.setPadding(0, ui.dp(15), 0, ui.dp(4));
+        body.addView(reviewsHeading);
+        boolean hasDraft = false;
+        for (String key : REVIEW_KEYS) {
+            try {
+                org.json.JSONObject stored = store.loadReview(document, key);
+                boolean older = store.reviewIsOutdated(document, key);
+                if (stored == null && !older) continue;
+                boolean table = ScanRecognition.EXCEL.equals(key) || ScanRecognition.HAND_TABLE.equals(key);
+                boolean handwritten = ScanRecognition.HANDWRITING.equals(key) || ScanRecognition.HAND_TABLE.equals(key);
+                String status = older ? " · 原图已更新" : "";
+                if (stored != null && table) {
+                    long pending = ScanRecognition.TableDraft.from(stored).tables.stream()
+                            .flatMap(t -> t.cells.stream()).filter(c -> !c.reviewed).count();
+                    if (pending > 0) status = " · " + pending + " 格待核对";
+                }
+                String review = (table ? "继续校对表格" : "查看文字稿")
+                        + (handwritten ? "（手写）" : "（印刷）") + status;
+                body.addView(actionTile(table ? R.drawable.ic_table : R.drawable.ic_text,
+                        review, review, false, () -> openReview(key, table)));
+                View spacing = new View(this);
+                body.addView(spacing, new LinearLayout.LayoutParams(ui.match(), ui.dp(5)));
+                hasDraft = true;
+            } catch (IOException | org.json.JSONException unreadable) {
+                body.addView(ui.text("有一份识别稿暂时无法读取", 14, ScanUi.SECONDARY));
+            }
+        }
+        if (!hasDraft) body.addView(ui.text("提取文字或表格后，可在这里继续校对。", 14, ScanUi.SECONDARY));
+        showSubsetDrafts(body, document.id);
+        return layout;
+    }
+
+    private void actionPair(LinearLayout body, String first, Runnable left, String second, Runnable right) {
+        LinearLayout row = ui.horizontal();
+        for (Button button : new Button[]{ui.button(first, false, left), ui.button(second, false, right)}) {
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ui.wrap(), 1);
+            params.setMargins(ui.dp(2), ui.dp(4), ui.dp(2), ui.dp(4));
+            row.addView(button, params);
+        }
+        body.addView(row);
+    }
+
+    private void openReview(String key, boolean table) {
+        reviewReturn = Screen.DETAIL;
+        if (table) recognizeTables(key);
+        else recognizeWord(key);
+    }
+
+    private void manageScanPages() {
+        if (document.pages.isEmpty()) {
+            addMenu();
+            return;
+        }
+        ScanSheet sheet = new ScanSheet(this, ui, "管理扫描页");
+        for (int i = 0; i < document.pages.size(); i++) {
+            ScanDocument.Page page = document.pages.get(i);
+            sheet.option(R.drawable.ic_document, "第 " + (i + 1) + " 页",
+                    "移动、旋转或移除", page.id.equals(selectedPage), () -> {
+                        selectedPage = page.id;
+                        pageMenu();
+                    });
+        }
+        sheet.option(R.drawable.ic_add, "添加页面", null, false, this::addMenu);
+        sheet.option(R.drawable.ic_check, "完成", null, false, () -> {});
+        sheet.show();
     }
 
     private View searchScreen() {
@@ -700,13 +1531,7 @@ public final class MainActivity extends ComponentActivity {
                 new LibrarySearchView.Actions() {
                     public void search(String query, boolean index) { runSearch(query, index); }
                     public void open(DocumentSearch.Hit hit) {
-                        try {
-                            ScanDocument item = store.load(hit.documentId);
-                            if (item == null) throw new IOException();
-                            MainActivity.this.open(item, hit.pageId);
-                        } catch (IOException unavailable) {
-                            error("无法打开这份扫描件", null);
-                        }
+                        openSearchHit(hit);
                     }
                 });
         if (!searchInput.trim().equals(searchQuery)) return searchView;
@@ -716,6 +1541,58 @@ public final class MainActivity extends ComponentActivity {
             main.post(() -> { if (searchView == visible && job == null) runSearch(searchQuery, false); });
         }
         return searchView;
+    }
+
+    private void openSearchHit(DocumentSearch.Hit hit) {
+        task("打开搜索结果", false, state -> {
+            ScanDocument source = store.load(hit.documentId);
+            if (source == null) throw new IOException("无法打开这份扫描件");
+            org.json.JSONObject json = hit.reviewKey == null ? null : store.loadReview(source, hit.reviewKey);
+            ScanRecognition.WordDraft body = json != null && hit.tableIndex < 0
+                    ? ScanRecognition.WordDraft.from(json) : null;
+            ScanRecognition.TableDraft grid = json != null && hit.tableIndex >= 0
+                    ? ScanRecognition.TableDraft.from(json) : null;
+            return new SearchDestination(source, body, grid);
+        }, result -> {
+            open(result.source, hit.pageId);
+            reviewReturn = Screen.SEARCH;
+            if (result.body != null && !result.body.pages.isEmpty()) {
+                wordDraft = result.body;
+                wordReviewKey = hit.reviewKey;
+                wordPage = Math.max(0, indexOf(hit.pageId));
+                wordDirty = false;
+                handwritingOriginal = true;
+                screen = Screen.WORD;
+                remember();
+                render();
+            } else if (result.grid != null && hit.tableIndex < result.grid.tables.size()) {
+                tableReviewKey = hit.reviewKey;
+                tableDraft = result.grid;
+                tableIndex = hit.tableIndex;
+                screen = Screen.EXCEL;
+                remember();
+                render();
+                OfficeTable found = tableDraft.tables.get(tableIndex);
+                if (hit.row >= 0 && hit.row < found.rows && hit.column >= 0 && hit.column < found.columns) {
+                    OfficeTable.Cell cell = found.cell(hit.row, hit.column);
+                    if (cell != null && tableGrid != null) editCell(cell, tableGrid);
+                }
+            } else if (hit.pageId != null) {
+                editFromDetail(false);
+            }
+        }, null);
+    }
+
+    private static final class SearchDestination {
+        final ScanDocument source;
+        final ScanRecognition.WordDraft body;
+        final ScanRecognition.TableDraft grid;
+
+        SearchDestination(ScanDocument source, ScanRecognition.WordDraft body, ScanRecognition.TableDraft grid) {
+            this.source = source;
+            this.body = body;
+            this.grid = grid;
+        }
     }
 
     private void runSearch(String query, boolean index) {
@@ -745,14 +1622,48 @@ public final class MainActivity extends ComponentActivity {
                     @Override public void load(ScanDocument.Page page, boolean original, boolean thumb,
                             EditorView.ImageResult result) { loadImage(current, page, original, thumb, result); }
                 });
+        String primary = batchEditing ? switch (batchAction) {
+            case WORD, HANDWRITING -> "提取文字";
+            case TABLE, HAND_TABLE -> "提取表格";
+            case ID -> "预览证件";
+            case QR -> "读取二维码";
+            case EDIT, CROP -> "保存文档";
+            default -> "预览效果";
+        } : "保存修改";
+        String summary = batchEditing ? switch (batchAction) {
+            case WORD -> "文字 · 印刷";
+            case HANDWRITING -> "文字 · 手写";
+            case TABLE -> "表格 · 印刷";
+            case HAND_TABLE -> "表格 · 手写或混合";
+            case ID -> "证件复印件";
+            case QR -> "扫码";
+            default -> "扫描文件";
+        } : null;
+        editor.configureWorkflow(primary, summary, batchEditing);
         return editor;
     }
 
     private void handleEditor(EditorView.Action action) {
         if (job != null) return;
         switch (action) {
-            case BACK:
+            case BACK: navigateBack(); break;
             case COMPLETE: finishEditor(); break;
+            case CONTINUE_CAPTURE: if (saveCrop(true)) capture(); break;
+            case MORE: imageToolsMenu(); break;
+            case APPLY_CROP:
+                if (saveCrop(true)) {
+                    cropping = false;
+                    pendingCrop = null;
+                    remember();
+                    render();
+                }
+                break;
+            case CANCEL_CROP:
+                cropping = false;
+                pendingCrop = null;
+                remember();
+                render();
+                break;
             case EXPORT: if (saveCrop(true)) showExportFormats(); break;
             case AUTO_CROP: automaticCrop(); break;
             case CROP: if (!cropping) startCrop(); break;
@@ -851,6 +1762,7 @@ public final class MainActivity extends ComponentActivity {
         if (job != null || !saveCrop(true)) return;
         selectedPage = page.id;
         pendingCrop = null;
+        if (batchEditing) cropping = true;
         remember();
         render();
     }
@@ -874,6 +1786,7 @@ public final class MainActivity extends ComponentActivity {
                 () -> movePage(current.id, document.pages.get(index - 1).id));
         if (index < document.pages.size() - 1) sheet.option(R.drawable.ic_down, "向后移动", null, false,
                 () -> movePage(current.id, document.pages.get(index + 1).id));
+        sheet.option(R.drawable.ic_rotate, "旋转本页", null, false, this::rotate);
         sheet.option(R.drawable.ic_image, "保存这页图片", null, false,
                 () -> { if (saveCrop(true)) imageFormats(); });
         sheet.option(R.drawable.ic_edit, "图片工具", null, false, this::imageToolsMenu);
@@ -900,21 +1813,43 @@ public final class MainActivity extends ComponentActivity {
 
     private void finishEditor() {
         if (!saveCrop(true)) return;
-        if (cropping) {
-            cropping = false;
-            pendingCrop = null;
+        if (batchEditing) {
+            if (currentPage() == null) {
+                toast("请先添加一页");
+                return;
+            }
+            if (batchAction == ImageTool.ID && document.pages.size() != 2
+                    || batchAction == ImageTool.QR && document.pages.size() != 1) {
+                error(batchAction == ImageTool.ID ? "证件复印件需要正面和反面各一页" : "扫码需要一张图片",
+                        this::pageMenu);
+                return;
+            }
+            ImageTool action = batchAction;
+            reviewReturn = Screen.DETAIL;
+            switch (action) {
+                case WORD -> { recognizeWord(ScanRecognition.WORD); return; }
+                case HANDWRITING -> { recognizeWord(ScanRecognition.HANDWRITING); return; }
+                case TABLE -> { recognizeTables(ScanRecognition.EXCEL); return; }
+                case HAND_TABLE -> { recognizeTables(ScanRecognition.HAND_TABLE); return; }
+                default -> { }
+            }
+            clearBatch();
+            reviewReturn = Screen.DETAIL;
+            screen = Screen.DETAIL;
             remember();
             render();
+            switch (action) {
+                case ID -> {
+                    selectedPage = document.pages.get(0).id;
+                    idSheet();
+                }
+                default -> runImageTool(action);
+            }
             return;
         }
-        document = null;
-        selectedPage = null;
+        cropping = false;
         pendingCrop = null;
-        wordDraft = null;
-        tableDraft = null;
         screen = editorReturn;
-        if (screen == Screen.SEARCH) searchResults = null;
-        editorReturn = Screen.LIBRARY;
         remember();
         render();
     }
@@ -993,17 +1928,25 @@ public final class MainActivity extends ComponentActivity {
 
     private void addMenu() {
         ScanSheet sheet = new ScanSheet(this, ui, "添加页面");
-        sheet.option(R.drawable.ic_camera, "拍照扫描", null, false, this::capture);
+        sheet.option(R.drawable.ic_camera, "拍照扫描", null, false, () -> {
+            if (batchEditing) capture();
+            else startScanCamera();
+        });
         sheet.option(R.drawable.ic_gallery, "从相册导入", "可一次选择多张", false, this::pick);
         sheet.show();
     }
 
     private void pick() {
-        int remaining = ScanStore.PAGE_LIMIT - (screen == Screen.EDITOR && document != null
-                ? document.pages.size() : 0);
-        if (nextImageTool == ImageTool.ID) remaining = Math.min(remaining, 2);
+        int existing = appendToCurrent() ? document.pages.size() : 0;
+        int remaining = ScanStore.PAGE_LIMIT - existing;
+        ImageTool action = batchEditing ? batchAction : nextImageTool;
+        if (action == ImageTool.ID) remaining = Math.min(remaining, 2 - existing);
+        if (action == ImageTool.QR) remaining = Math.min(remaining, 1 - existing);
         if (remaining <= 0) {
-            toast("一份扫描件最多 " + ScanStore.PAGE_LIMIT + " 页");
+            boolean fromCapture = pickingForCapture;
+            pickingForCapture = false;
+            toast("当前批次无法再添加图片");
+            if (fromCapture && existing < ScanStore.PAGE_LIMIT) capture();
             return;
         }
         if (Build.VERSION.SDK_INT >= 33) {
@@ -1023,21 +1966,105 @@ public final class MainActivity extends ComponentActivity {
         try {
             gallery.launch(files);
         } catch (ActivityNotFoundException unavailable) {
-            error("此设备没有可用的图片选择器", null);
+            boolean fromCapture = pickingForCapture;
+            pickingForCapture = false;
+            error("此设备没有可用的图片选择器", fromCapture ? this::capture : null);
         }
     }
 
+    private void startScanCamera() {
+        startCamera(ImageTool.EDIT);
+    }
+
+    private void startCamera(ImageTool action) {
+        nextImageTool = action;
+        captureMode = switch (action) {
+            case ID -> "id";
+            case QR -> "qr";
+            case WORD, HANDWRITING -> "text";
+            case TABLE, HAND_TABLE -> "table";
+            default -> "file";
+        };
+        captureHandwriting = action == ImageTool.HANDWRITING || action == ImageTool.HAND_TABLE;
+        capture();
+    }
+
+    private boolean appendToCurrent() {
+        return (screen == Screen.EDITOR || screen == Screen.DETAIL) && document != null;
+    }
+
     private void capture() {
-        int remaining = ScanStore.PAGE_LIMIT - (screen == Screen.EDITOR && document != null
-                ? document.pages.size() : 0);
+        if (preferences.contains(INCOMING_FILES)) {
+            offerCaptureRecovery();
+            return;
+        }
+        int existing = appendToCurrent() ? document.pages.size() : 0;
+        int remaining = ScanStore.PAGE_LIMIT - existing;
         if (remaining <= 0) {
             toast("一份扫描件最多 " + ScanStore.PAGE_LIMIT + " 页");
             return;
         }
-        boolean id = nextImageTool == ImageTool.ID;
-        camera.launch(new Intent(this, CaptureActivity.class)
-                .putExtra(CaptureActivity.EXTRA_LIMIT, id ? Math.min(2, remaining) : remaining)
-                .putExtra(CaptureActivity.EXTRA_MULTIPLE, id));
+        Intent intent = new Intent(this, CaptureActivity.class)
+                .putExtra(CaptureActivity.EXTRA_LIMIT, remaining)
+                .putExtra(CaptureActivity.EXTRA_WORK_MODE, captureMode)
+                .putExtra(CaptureActivity.EXTRA_HANDWRITING, captureHandwriting)
+                .putExtra(CaptureActivity.EXTRA_INITIAL_PAGE_COUNT, existing);
+        if (existing > 0) {
+            intent.putExtra(CaptureActivity.EXTRA_EXISTING_THUMBNAIL,
+                    store.image(document, document.pages.get(existing - 1)).getAbsolutePath());
+        }
+        camera.launch(intent);
+    }
+
+    private void parkCaptureInTools() {
+        if (toolsResumeCapture) {
+            ScanSheet sheet = new ScanSheet(this, ui, "已有待继续的拍摄");
+            sheet.detail(appendToCurrent() ? "先前批次的返回入口已保留。当前图片可在文件中打开。"
+                    : "先前批次的返回入口已保留。");
+            sheet.option(R.drawable.ic_tools, "打开工具", null, false, this::showTools);
+            sheet.option(R.drawable.ic_camera, "继续当前拍摄", null, false, this::capture);
+            sheet.option(R.drawable.ic_back, "返回先前拍摄", null, false, this::resumeParkedCapture);
+            sheet.show();
+            return;
+        }
+        toolsResumeCapture = true;
+        parkedBatchId = appendToCurrent() && document != null ? document.id : null;
+        parkedMode = captureMode;
+        parkedHandwriting = captureHandwriting;
+        parkedAction = batchEditing ? batchAction : nextImageTool;
+        parkedReturn = screen;
+        parkedEditorReturn = editorReturn;
+        showTools();
+    }
+
+    private void resumeParkedCapture() {
+        toolsResumeCapture = false;
+        captureMode = parkedMode;
+        captureHandwriting = parkedHandwriting;
+        nextImageTool = parkedAction;
+        screen = parkedReturn;
+        clearBatch();
+        if (parkedBatchId != null) {
+            try {
+                document = store.load(parkedBatchId);
+                if (document == null) throw new IOException("批次不存在");
+            } catch (IOException unavailable) {
+                document = null;
+                screen = Screen.LIBRARY;
+                render();
+                error("无法恢复相机批次，可以在文件中重新打开扫描件", null);
+                return;
+            }
+            screen = Screen.EDITOR;
+            batchEditing = true;
+            batchAction = parkedAction;
+            cropping = true;
+            selectedPage = document.pages.isEmpty() ? null : document.pages.get(document.pages.size() - 1).id;
+            editorReturn = parkedEditorReturn;
+            remember();
+        }
+        render();
+        capture();
     }
 
     private Uri uri(File file) {
@@ -1055,8 +2082,16 @@ public final class MainActivity extends ComponentActivity {
         }
         if (request == PICK_IMAGES) {
             List<Uri> chosen = result == RESULT_OK ? pickedUris(data) : new ArrayList<>();
-            if (!chosen.isEmpty()) importPhotos(chosen, new ArrayList<>());
-            else nextImageTool = ImageTool.EDIT;
+            boolean fromCapture = pickingForCapture;
+            pickingForCapture = false;
+            if (!chosen.isEmpty()) {
+                importPhotos(chosen, new ArrayList<>(), fromCapture, null);
+            } else if (fromCapture) {
+                render();
+                capture();
+            } else {
+                nextImageTool = ImageTool.EDIT;
+            }
         }
     }
 
@@ -1065,17 +2100,23 @@ public final class MainActivity extends ComponentActivity {
             nextImageTool = ImageTool.EDIT;
             return;
         }
+        String returnedMode = data.getStringExtra(CaptureActivity.EXTRA_WORK_MODE);
+        if (returnedMode != null) captureMode = returnedMode;
+        captureHandwriting = data.getBooleanExtra(CaptureActivity.EXTRA_HANDWRITING, captureHandwriting);
+        ImageTool requested = batchEditing ? batchAction : nextImageTool;
+        nextImageTool = switch (captureMode) {
+            case "text" -> captureHandwriting ? ImageTool.HANDWRITING : ImageTool.WORD;
+            case "table" -> captureHandwriting ? ImageTool.HAND_TABLE : ImageTool.TABLE;
+            case "id" -> ImageTool.ID;
+            case "qr" -> ImageTool.QR;
+            default -> switch (requested) {
+                case WORD, HANDWRITING, TABLE, HAND_TABLE, ID, QR -> ImageTool.EDIT;
+                default -> requested;
+            };
+        };
         String shortcut = data.getStringExtra(CaptureActivity.EXTRA_DESTINATION);
-        if (CaptureActivity.DEST_ALBUM.equals(shortcut)) {
-            pick();
-            return;
-        }
-        if (CaptureActivity.DEST_PDF.equals(shortcut) || CaptureActivity.DEST_TOOLS.equals(shortcut)) {
-            nextImageTool = ImageTool.EDIT;
-            if (CaptureActivity.DEST_PDF.equals(shortcut)) openPdf(PdfTool.ADD);
-            else showTools();
-            return;
-        }
+        Runnable after = afterCaptureShortcut(shortcut);
+
         List<String> names = data.getStringArrayListExtra(CaptureActivity.EXTRA_FILES);
         List<File> photos = new ArrayList<>();
         List<Uri> inputs = new ArrayList<>();
@@ -1090,11 +2131,110 @@ public final class MainActivity extends ComponentActivity {
                 inputs.add(uri(file));
             }
         }
-        if (!inputs.isEmpty()) importPhotos(inputs, photos);
-        else {
+        if (!inputs.isEmpty()) {
+            importingShortcut = shortcut;
+            importPhotos(inputs, photos, true, after);
+            return;
+        }
+        if (batchEditing) batchAction = nextImageTool;
+        if (after != null) {
+            after.run();
+        } else if (appendToCurrent() && (names == null || names.isEmpty())) {
+            batchAction = nextImageTool;
             nextImageTool = ImageTool.EDIT;
+            batchEditing = true;
+            cropping = true;
+            pendingCrop = null;
+            if (screen == Screen.DETAIL) editorReturn = Screen.DETAIL;
+            screen = Screen.EDITOR;
+            remember();
+            render();
+        } else {
             error("相机没有返回完整图片，请重拍", this::capture);
         }
+    }
+
+    private Runnable afterCaptureShortcut(String shortcut) {
+        if (CaptureActivity.DEST_ALBUM.equals(shortcut)) return () -> {
+            pickingForCapture = true;
+            pick();
+        };
+        if (CaptureActivity.DEST_TOOLS.equals(shortcut)) return this::parkCaptureInTools;
+        if (CaptureActivity.DEST_PDF.equals(shortcut)) return () -> openPdf(PdfTool.ADD);
+        return null;
+    }
+
+    private void offerCaptureRecovery() {
+        new AlertDialog.Builder(this).setTitle("待导入的拍摄批次")
+                .setMessage("已拍原图保存在本机。可以继续导入，或稍后从页面顶部恢复。")
+                .setPositiveButton("继续导入", (dialog, which) -> recoverCapture())
+                .setNeutralButton("稍后", null)
+                .setNegativeButton("放弃待导入照片", (dialog, which) -> confirmDiscardCapture()).show();
+    }
+
+    private void confirmDiscardCapture() {
+        new AlertDialog.Builder(this).setTitle("放弃待导入的照片？")
+                .setMessage("尚未加入文档的照片将被删除。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("放弃", (dialog, which) -> {
+                    for (File file : incomingFiles(preferences.getString(INCOMING_FILES, ""))) file.delete();
+                    preferences.edit().remove(INCOMING_FILES).apply();
+                    render();
+                }).show();
+    }
+
+    private List<File> incomingFiles(String names) {
+        List<File> files = new ArrayList<>();
+        File directory = new File(getFilesDir(), "incoming");
+        for (String name : names.split(",")) {
+            if (!name.endsWith(".jpg") || !ScanStore.validId(name.substring(0, name.length() - 4))) continue;
+            File file = new File(directory, name);
+            if (file.isFile()) files.add(file);
+        }
+        return files;
+    }
+
+    private void recoverCapture() {
+        List<File> captured = incomingFiles(preferences.getString(INCOMING_FILES, ""));
+        if (captured.isEmpty()) {
+            preferences.edit().remove(INCOMING_FILES).apply();
+            render();
+            return;
+        }
+        String id = preferences.getString("pendingCapture.id", "");
+        nextImageTool = ImageTool.valueOf(preferences.getString("pendingCapture.action", ImageTool.EDIT.name()));
+        captureMode = preferences.getString("pendingCapture.mode", "file");
+        captureHandwriting = preferences.getBoolean("pendingCapture.handwriting", false);
+        importingShortcut = preferences.getString("pendingCapture.shortcut", null);
+        List<Uri> inputs = new ArrayList<>();
+        for (File file : captured) inputs.add(uri(file));
+        try {
+            ScanDocument saved = store.load(id);
+            if (saved != null) {
+                if (document == null || !document.id.equals(id)) detailReturn = screen;
+                document = saved;
+                screen = Screen.DETAIL;
+            }
+            importPhotos(inputs, captured, true, afterCaptureShortcut(importingShortcut), id);
+        } catch (IOException unreadable) {
+            error("无法读取待接续的扫描件", this::recoverCapture);
+        }
+    }
+
+    private void stageCapture(List<File> files, ScanDocument destination, ImageTool action) {
+        List<String> names = new ArrayList<>();
+        for (File file : files) names.add(file.getName());
+        preferences.edit().putString(INCOMING_FILES, String.join(",", names))
+                .putString("pendingCapture.id", destination.id)
+                .putString("pendingCapture.action", action.name())
+                .putString("pendingCapture.mode", captureMode)
+                .putBoolean("pendingCapture.handwriting", captureHandwriting)
+                .putString("pendingCapture.shortcut", importingShortcut).commit();
+    }
+
+    private static String capturedPageId(File file) {
+        String name = file.getName();
+        return name.substring(0, name.length() - 4);
     }
 
     private static List<Uri> pickedUris(Intent data) {
@@ -1111,36 +2251,58 @@ public final class MainActivity extends ComponentActivity {
         return new ArrayList<>(picked);
     }
 
-    private void importPhotos(List<Uri> inputs, List<File> captured) {
-        ImageTool action = nextImageTool;
+    private void importPhotos(List<Uri> inputs, List<File> captured, boolean fromCamera, Runnable after) {
+        importPhotos(inputs, captured, fromCamera, after, null);
+    }
+
+    private void importPhotos(List<Uri> inputs, List<File> captured, boolean fromCamera, Runnable after,
+            String recoveredId) {
+        ImageTool action = fromCamera || !batchEditing ? nextImageTool : batchAction;
         ScanDocument.Filter initialFilter = switch (action) {
             case SCREEN -> ScanDocument.Filter.SCREEN;
             case EDIT, ENHANCE, WORD, TABLE, CROP, BOOK, FLATTEN -> ScanDocument.Filter.AUTO;
             default -> ScanDocument.Filter.ORIGINAL;
         };
         nextImageTool = ImageTool.EDIT;
-        boolean append = screen == Screen.EDITOR && document != null;
+        boolean append = appendToCurrent() && (recoveredId == null || document.id.equals(recoveredId));
+        boolean prepareBatch = fromCamera || batchEditing || action == ImageTool.EDIT;
         Screen returnScreen = screen;
-        ScanDocument fresh = append ? document : store.newDocument();
+        ScanDocument allocated = append ? document : store.newDocument();
+        ScanDocument fresh = recoveredId == null || append ? allocated
+                : new ScanDocument(recoveredId, allocated.name, allocated.modifiedAt, allocated.revision,
+                        allocated.pages, allocated.folder, allocated.titleSource);
         ScanDocument destination = !append && action == ImageTool.ID
                 ? fresh.filed(ScanDocument.Folder.IDS) : fresh;
+        if (!captured.isEmpty()) stageCapture(captured, destination, action);
+        Set<String> existingIds = new LinkedHashSet<>();
+        for (ScanDocument.Page page : destination.pages) existingIds.add(page.id);
+        int newPages = inputs.size();
+        for (File file : captured) if (existingIds.contains(capturedPageId(file))) newPages--;
         int room = ScanStore.PAGE_LIMIT - destination.pages.size();
-        if (inputs.size() > room) {
-            for (File file : captured) file.delete();
-            error("只能再加入 " + room + " 页，请减少所选图片张数", null);
+        if (captured.isEmpty() && action == ImageTool.ID) room = Math.min(room, 2 - destination.pages.size());
+        if (captured.isEmpty() && action == ImageTool.QR) room = Math.min(room, 1 - destination.pages.size());
+        if (newPages > Math.max(0, room)) {
+            render();
+            error("只能再加入 " + Math.max(0, room) + " 页，请减少所选图片张数", null);
             return;
         }
         task("导入图片", true, state -> {
             List<ScanDocument.Page> pages = new ArrayList<>(destination.pages);
             List<ScanDocument.Page> added = new ArrayList<>();
             List<Integer> failed = new ArrayList<>();
+            List<File> accepted = new ArrayList<>();
             Uri firstImported = null;
             boolean saved = false;
             try {
                 for (int i = 0; i < inputs.size(); i++) {
                     state.check();
-                    ScanDocument.Page page = new ScanDocument.Page(ScanStore.newId(), 0,
-                            CropQuad.FULL, initialFilter);
+                    File staged = captured.isEmpty() ? null : captured.get(i);
+                    String pageId = staged == null ? ScanStore.newId() : capturedPageId(staged);
+                    if (staged != null && existingIds.contains(pageId)) {
+                        accepted.add(staged);
+                        continue;
+                    }
+                    ScanDocument.Page page = new ScanDocument.Page(pageId, 0, CropQuad.FULL, initialFilter);
                     Bitmap bitmap = null;
                     boolean kept = false;
                     try {
@@ -1162,6 +2324,7 @@ public final class MainActivity extends ComponentActivity {
                         added.add(page);
                         pages.add(page);
                         kept = true;
+                        if (staged != null) accepted.add(staged);
                         if (firstImported == null) firstImported = inputs.get(i);
                     } catch (IOException | RuntimeException invalid) {
                         failed.add(i + 1);
@@ -1171,34 +2334,54 @@ public final class MainActivity extends ComponentActivity {
                     }
                     state.progress(i + 1, inputs.size());
                 }
-                if (added.isEmpty()) throw new IOException("没有图片成功导入，请检查文件格式或访问权限");
-                ScanDocument merged = destination.withPages(pages);
+                if (added.isEmpty() && accepted.isEmpty()) {
+                    throw new IOException("没有图片成功导入，请检查文件格式或访问权限");
+                }
+                ScanDocument merged = added.isEmpty() ? destination : destination.withPages(pages);
                 if (!append && captured.isEmpty()) merged = importTitle(merged, firstImported);
                 state.check();
-                store.save(merged);
+                if (!added.isEmpty()) store.save(merged);
                 saved = true;
-                return new ImportResult(merged, added.get(0).id, failed);
+                if (!captured.isEmpty()) {
+                    List<File> remaining = new ArrayList<>(captured);
+                    remaining.removeAll(accepted);
+                    if (remaining.isEmpty()) preferences.edit().remove(INCOMING_FILES).commit();
+                    else stageCapture(remaining, destination, action);
+                }
+                List<ScanDocument.Page> selection = added.isEmpty() ? pages : added;
+                return new ImportResult(merged, selection.get(fromCamera ? selection.size() - 1 : 0).id, failed);
             } finally {
                 if (!saved) for (ScanDocument.Page page : added) store.removeSource(destination, page);
-                for (File file : captured) file.delete();
+                if (saved) for (File file : accepted) file.delete();
             }
         }, imported -> {
             document = imported.document;
-            if (!append) editorReturn = returnScreen == Screen.TOOLS ? Screen.TOOLS : Screen.LIBRARY;
+            if (!append) {
+                detailReturn = returnScreen;
+                editorReturn = Screen.DETAIL;
+            } else if (returnScreen == Screen.DETAIL) {
+                editorReturn = Screen.DETAIL;
+            }
             selectedPage = imported.first;
-            cropping = action == ImageTool.CROP;
             pendingCrop = null;
-            screen = Screen.EDITOR;
+            reviewReturn = Screen.DETAIL;
+            batchEditing = prepareBatch;
+            batchAction = prepareBatch ? action : ImageTool.EDIT;
+            cropping = prepareBatch || action == ImageTool.CROP;
+            if (!fromCamera && !append && prepareBatch) {
+                captureMode = "file";
+                captureHandwriting = false;
+            }
+            screen = prepareBatch || action == ImageTool.CROP ? Screen.EDITOR : Screen.DETAIL;
             remember();
             render();
-            if (!imported.failed.isEmpty()) {
-                String failed = "以下所选图片无法导入：" + joined(imported.failed);
-                if (action == ImageTool.EDIT) error(failed, null);
-                else new AlertDialog.Builder(this).setMessage(failed)
-                        .setNegativeButton("留在编辑页", null)
-                        .setPositiveButton("继续", (dialog, which) -> runImageTool(action)).show();
-            } else runImageTool(action);
-        }, null);
+            if (!imported.failed.isEmpty()) toast("以下图片无法导入：" + joined(imported.failed));
+            if (after != null && !preferences.contains(INCOMING_FILES)) {
+                after.run();
+            } else if (!prepareBatch) {
+                runImageTool(action);
+            }
+        }, captured.isEmpty() ? null : this::recoverCapture);
     }
 
     private void openPdf(PdfTool action) {
@@ -1220,19 +2403,27 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void showPdf(PdfTool action) {
-        screen = Screen.PDF;
-        render();
-        if (action == PdfTool.OPEN) return;
-        if (action == PdfTool.ADD) pickPdf(PdfTool.OPEN);
-        else if (pdfPages.isEmpty()) pickPdf(action);
-        else choosePdfSource(action);
+        if (action == PdfTool.OPEN) {
+            screen = Screen.PDF;
+            render();
+        } else if (action == PdfTool.ADD) {
+            pickPdf(PdfTool.OPEN);
+        } else if (pdfPages.isEmpty()) {
+            pickPdf(action);
+        } else {
+            choosePdfSource(action);
+        }
     }
 
     private void choosePdfSource(PdfTool action) {
         ScanSheet sheet = new ScanSheet(this, ui, "选择 PDF 文件");
         int count = selectedPdfPages().size();
         sheet.option(R.drawable.ic_pdf, "使用工作台", "当前已选 " + count + " 页",
-                false, () -> runPdfTool(action));
+                false, () -> {
+                    screen = Screen.PDF;
+                    render();
+                    runPdfTool(action);
+                });
         String detail = action == PdfTool.MERGE ? "添加到工作台后选择和排序" : "导入并选中新文件的页面";
         sheet.option(R.drawable.ic_add, "导入 PDF", detail, false, () -> pickPdf(action));
         sheet.show();
@@ -1277,7 +2468,9 @@ public final class MainActivity extends ComponentActivity {
 
     private View pdfEditor() {
         LinearLayout layout = ui.vertical();
-        layout.addView(ui.header("PDF 工作台", this::navigateBack,
+        String title = pdfPages.isEmpty() ? "PDF 阅读" : pdfPages.get(
+                Math.max(0, Math.min(pdfPage, pdfPages.size() - 1))).name;
+        layout.addView(ui.header(title, this::navigateBack,
                 pdfPages.isEmpty() ? "导入 PDF" : "导出",
                 pdfPages.isEmpty() ? () -> pickPdf(PdfTool.OPEN) : this::pdfExportMenu));
         layout.addView(ui.rule());
@@ -1333,8 +2526,8 @@ public final class MainActivity extends ComponentActivity {
         footer.setPadding(ui.dp(16), ui.dp(9), ui.dp(16), ui.dp(11));
         LinearLayout.LayoutParams left = new LinearLayout.LayoutParams(0, ui.wrap(), 1);
         left.setMarginEnd(ui.dp(8));
-        footer.addView(ui.button("添加 PDF", false, () -> pickPdf(PdfTool.OPEN)), left);
-        footer.addView(ui.button("选页与排序", false, this::managePdfPages),
+        footer.addView(ui.button("管理页面", false, this::managePdfPages), left);
+        footer.addView(ui.button("转换", false, this::pdfConversionMenu),
                 new LinearLayout.LayoutParams(0, ui.wrap(), 1));
         controls.addView(footer);
         Configuration config = getResources().getConfiguration();
@@ -1493,6 +2686,15 @@ public final class MainActivity extends ComponentActivity {
                 }, null)).show();
     }
 
+    private void pdfConversionMenu() {
+        ScanSheet sheet = new ScanSheet(this, ui, "转换 PDF");
+        sheet.option(R.drawable.ic_text, "提取文字", "校对正文，可复制或导出 Word", false,
+                () -> runPdfTool(PdfTool.WORD));
+        sheet.option(R.drawable.ic_table, "提取表格", "校对表格后导出 Excel", false,
+                () -> runPdfTool(PdfTool.EXCEL));
+        sheet.show();
+    }
+
     private void pdfExportMenu() {
         int count = selectedPdfPages().size();
         ScanSheet sheet = new ScanSheet(this, ui, "导出 PDF 工作台");
@@ -1501,10 +2703,6 @@ public final class MainActivity extends ComponentActivity {
                 () -> runPdfTool(PdfTool.SAVE));
         sheet.option(R.drawable.ic_crop, "按页拆分", "每页各生成一份 PDF，保存为 ZIP", false,
                 () -> runPdfTool(PdfTool.SPLIT));
-        sheet.option(R.drawable.ic_document, "转 Word", "按页生成可编辑正文", false,
-                () -> runPdfTool(PdfTool.WORD));
-        sheet.option(R.drawable.ic_table, "转 Excel", "从所选页识别表格", false,
-                () -> runPdfTool(PdfTool.EXCEL));
         sheet.option(R.drawable.ic_image, "转图片", "保存当前页或批量导出", false,
                 () -> runPdfTool(PdfTool.IMAGES));
         sheet.option(R.drawable.ic_gallery, "转长图", "按页序纵向拼接", false, () -> runPdfTool(PdfTool.LONG));
@@ -1548,15 +2746,11 @@ public final class MainActivity extends ComponentActivity {
                 exportPdfCopy(picked, title + " - 压缩", null, true);
                 break;
             case WORD:
-                prepareFile(FileFormat.DOCX, title, (output, state) ->
-                        OfficeExport.word(pdfText(picked, state), output));
-                break;
             case TEXT:
-                task("提取 PDF 文字", true, state -> pdfText(picked, state),
-                        words -> textResult("提取文字", String.join("\n\n", words)), null);
+                choosePdfRecognition(picked, title, false);
                 break;
             case EXCEL:
-                choosePdfTableMode(picked, title);
+                choosePdfRecognition(picked, title, true);
                 break;
             case PNG:
                 savePng(pdfFileTitle(current) + " - 第 " + (current.index + 1) + " 页",
@@ -1641,25 +2835,21 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void imageToolPicker(String label, ImageTool action) {
-        ScanSheet sheet = new ScanSheet(this, ui, label);
-        if (document != null && currentPage() != null) {
-            sheet.option(R.drawable.ic_document, "使用当前扫描件", document.name, false, () -> {
-                screen = Screen.EDITOR;
-                render();
-                runImageTool(action);
-            });
-        } else {
-            sheet.option(R.drawable.ic_document, "从已有扫描件选择", null, false,
-                    () -> chooseScanForTool(label, action));
+        ScanSheet sheet = new ScanSheet(this, ui, "选择材料 · " + label);
+        if (appendToCurrent() && currentPage() != null) {
+            sheet.option(R.drawable.ic_document, "使用当前扫描件", document.name, false, () -> runImageTool(action));
         }
-        sheet.option(R.drawable.ic_camera, "拍照扫描", null, false, () -> {
-            nextImageTool = action;
-            capture();
-        });
+        sheet.option(R.drawable.ic_document, "从已有扫描件选择", null, false,
+                () -> chooseScanForTool(label, action));
+        sheet.option(R.drawable.ic_camera, "拍照扫描", null, false, () -> startCamera(action));
         sheet.option(R.drawable.ic_gallery, "从相册导入", null, false, () -> {
             nextImageTool = action;
             pick();
         });
+        if (action == ImageTool.WORD || action == ImageTool.TABLE) {
+            sheet.option(R.drawable.ic_pdf, "选择 PDF", null, false,
+                    () -> openPdf(action == ImageTool.WORD ? PdfTool.WORD : PdfTool.EXCEL));
+        }
         sheet.show();
     }
 
@@ -1703,7 +2893,8 @@ public final class MainActivity extends ComponentActivity {
     private void runImageTool(ImageTool action) {
         if (action == ImageTool.EDIT || currentPage() == null) return;
         if (action == ImageTool.CROP) {
-            if (!cropping) startCrop();
+            if (screen == Screen.DETAIL) editFromDetail(true);
+            else if (!cropping) startCrop();
             return;
         }
         if (!saveCrop(true)) return;
@@ -1717,13 +2908,13 @@ public final class MainActivity extends ComponentActivity {
                 filters();
                 break;
             case WORD:
-                recognizeWord(ScanRecognition.WORD);
+                chooseRecognitionMode(false);
                 break;
             case HANDWRITING:
                 recognizeWord(ScanRecognition.HANDWRITING);
                 break;
             case TABLE:
-                chooseTableMode();
+                chooseRecognitionMode(true);
                 break;
             case HAND_TABLE:
                 recognizeTables(ScanRecognition.HAND_TABLE);
@@ -1774,8 +2965,9 @@ public final class MainActivity extends ComponentActivity {
         if (currentPage() == null || !saveCrop(true)) return;
         ScanSheet sheet = new ScanSheet(this, ui, "图片工具");
         sheet.option(R.drawable.ic_image, "等比改尺寸", null, false, () -> runImageTool(ImageTool.RESIZE));
-        sheet.option(R.drawable.ic_document, currentPage().isFlattened() ? "恢复展平前" : "书页展平",
-                null, false, () -> runImageTool(ImageTool.FLATTEN));
+        sheet.option(R.drawable.ic_document, "书页处理", null, false, () -> bookTools(true));
+        sheet.option(R.drawable.ic_text, "提取文字", null, false, () -> chooseRecognitionMode(false));
+        sheet.option(R.drawable.ic_table, "提取表格", null, false, () -> chooseRecognitionMode(true));
         sheet.option(R.drawable.ic_gallery, "合并长图", null, false, () -> runImageTool(ImageTool.LONG));
         sheet.option(R.drawable.ic_edit, "添加水印", null, false, () -> runImageTool(ImageTool.WATERMARK));
         sheet.option(R.drawable.ic_edit, "手写签名", null, false, () -> runImageTool(ImageTool.SIGN));
@@ -1934,16 +3126,84 @@ public final class MainActivity extends ComponentActivity {
     private void editImage(String suffix, BitmapEdit edit) {
         ScanDocument current = document;
         ScanDocument.Page page = currentPage();
-        savePng(current.name + " - " + suffix, state -> {
+        task("生成预览", true, state -> {
             Bitmap input = ScanImages.render(store.image(current, page), page, ScanImages.EXPORT_EDGE);
-            Bitmap output = null;
-            try {
-                output = edit.apply(input);
-                return output;
-            } finally {
-                if (input != output) input.recycle();
+            return toolPreview(input, edit);
+        }, images -> showToolPreview(suffix, "第 " + (indexOf(page.id) + 1) + " 页", images,
+                "另存图片", () -> savePng(current.name + " - " + suffix, state -> {
+                    Bitmap input = ScanImages.render(store.image(current, page), page, ScanImages.EXPORT_EDGE);
+                    Bitmap output = null;
+                    try {
+                        output = edit.apply(input);
+                        return output;
+                    } finally {
+                        if (output != input) input.recycle();
+                    }
+                })), null);
+    }
+
+    private static ToolPreview toolPreview(Bitmap input, BitmapEdit edit) throws IOException {
+        Bitmap edited = null;
+        Bitmap original = null;
+        try {
+            edited = edit.apply(input);
+            original = previewScale(input);
+            Bitmap result = input == edited ? original : previewScale(edited);
+            return new ToolPreview(original, result);
+        } catch (RuntimeException | IOException failure) {
+            if (original != null) original.recycle();
+            throw failure;
+        } finally {
+            if (input != original) input.recycle();
+            if (edited != null && edited != input && Math.max(edited.getWidth(), edited.getHeight()) > 1500) {
+                edited.recycle();
             }
+        }
+    }
+
+    private static Bitmap previewScale(Bitmap source) {
+        int edge = Math.max(source.getWidth(), source.getHeight());
+        if (edge <= 1500) return source;
+        return Bitmap.createScaledBitmap(source, Math.max(1, Math.round(source.getWidth() * 1500f / edge)),
+                Math.max(1, Math.round(source.getHeight() * 1500f / edge)), true);
+    }
+
+    private static final class ToolPreview implements AutoCloseable {
+        final Bitmap original;
+        final Bitmap result;
+
+        ToolPreview(Bitmap original, Bitmap result) {
+            this.original = original;
+            this.result = result;
+        }
+
+        @Override public void close() {
+            if (original != null && original != result) original.recycle();
+            result.recycle();
+        }
+    }
+
+    private void showToolPreview(String title, String scope, ToolPreview images, String action, Runnable save) {
+        LinearLayout body = ui.vertical();
+        ScanPreview image = new ScanPreview(this, ui);
+        body.addView(ui.text(scope, 14, ScanUi.SECONDARY));
+        if (images.original != null) {
+            actionPair(body, "原图", () -> image.show(images.original, null, null, true),
+                    "处理结果", () -> image.show(images.result, null, null, true));
+        }
+        int height = Math.max(120, Math.min(430, getResources().getConfiguration().screenHeightDp - 260));
+        body.addView(image, new LinearLayout.LayoutParams(ui.match(), ui.dp(height)));
+        image.show(images.result, null, null);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle(title).setView(inset(body))
+                .setNegativeButton("返回调整", null)
+                .setPositiveButton(action, (d, which) -> save.run()).create();
+        toolPreviewDialog = dialog;
+        dialog.setOnDismissListener(d -> {
+            image.show(null, null, null);
+            images.close();
+            if (toolPreviewDialog == dialog) toolPreviewDialog = null;
         });
+        dialog.show();
     }
 
     private void savePng(String title, Job<Bitmap> art) {
@@ -1982,23 +3242,26 @@ public final class MainActivity extends ComponentActivity {
         int start = Math.max(0, indexOf(selectedPage));
         ScanDocument.Page front = current.pages.get(start);
         ScanDocument.Page back = start + 1 < current.pages.size() ? current.pages.get(start + 1) : null;
-        new AlertDialog.Builder(this).setTitle("证件合页")
-                .setMessage(back != null ? "将当前页和下一页排进一张 A4，分别作为证件正面和背面。"
-                        : "将当前页按比例排进一张 A4。")
-                .setNegativeButton("取消", null)
-                .setPositiveButton("继续", (dialog, which) ->
-                    prepareFile(FileFormat.PDF, current.name + " - 证件合页", (stream, state) -> {
-                        Bitmap first = ScanImages.render(store.image(current, front), front, 1350);
-                        Bitmap second = null;
-                        try {
-                            if (back != null) second = ScanImages.render(store.image(current, back), back, 1350);
-                            Bitmap sheet = LocalImages.idSheet(first, second);
-                            ScanExport.rasterPdf(1, index -> sheet, true, stream, state::progress);
-                        } finally {
-                            first.recycle();
-                            if (second != null) second.recycle();
-                        }
-                    })).show();
+        String scope = back == null ? "正面 · 第 " + (start + 1) + " 页"
+                : "正面 · 第 " + (start + 1) + " 页，反面 · 第 " + (start + 2) + " 页";
+        task("预览证件复印件", true,
+                state -> new ToolPreview(null, renderIdSheet(current, front, back)),
+                images -> showToolPreview("证件复印件", scope, images,
+                        "保存 PDF", () -> prepareFile(FileFormat.PDF, current.name + " - 证件合页",
+                                (stream, state) -> ScanExport.rasterPdf(1, index -> renderIdSheet(current, front, back),
+                                        true, stream, state::progress))), null);
+    }
+
+    private Bitmap renderIdSheet(ScanDocument current, ScanDocument.Page front, ScanDocument.Page back) throws IOException {
+        Bitmap first = ScanImages.render(store.image(current, front), front, 1350);
+        Bitmap second = null;
+        try {
+            if (back != null) second = ScanImages.render(store.image(current, back), back, 1350);
+            return LocalImages.idSheet(first, second);
+        } finally {
+            first.recycle();
+            if (second != null) second.recycle();
+        }
     }
 
     private void splitBook() {
@@ -2065,22 +3328,21 @@ public final class MainActivity extends ComponentActivity {
                 false, this::pdfFormats);
         sheet.option(R.drawable.ic_image, "校正图片", "导出当前页为 JPG 或 PNG",
                 false, this::imageFormats);
-        sheet.option(R.drawable.ic_table, "Excel 表格", "识别表格，校对后保存为 .xlsx",
-                false, this::chooseTableMode);
-        sheet.option(R.drawable.ic_table, "手写转 Excel", "识别手写表格，对照原图逐格校对", false,
-                () -> recognizeTables(ScanRecognition.HAND_TABLE));
-        sheet.option(R.drawable.ic_document, "Word 文档", "提取文字，校对后保存为 .docx",
-                false, () -> recognizeWord(ScanRecognition.WORD));
-        sheet.option(R.drawable.ic_edit, "手写转 Word", "识别手写笔记，对照原稿校对", false,
-                () -> recognizeWord(ScanRecognition.HANDWRITING));
         sheet.show();
     }
 
     private void pdfFormats() {
         ScanSheet sheet = new ScanSheet(this, ui, "PDF 页面尺寸");
-        sheet.option(R.drawable.ic_pdf, "A4 纸张", "等比适配，方便打印", false, () -> exportPdf(true));
-        sheet.option(R.drawable.ic_image, "图片比例", "保留每页的画面比例", false, () -> exportPdf(false));
+        boolean a4 = defaultA4();
+        addPdfFormat(sheet, a4, true);
+        addPdfFormat(sheet, !a4, false);
         sheet.show();
+    }
+
+    private void addPdfFormat(ScanSheet sheet, boolean a4, boolean preferred) {
+        String detail = a4 ? "等比适配，方便打印" : "保留每页的画面比例";
+        sheet.option(a4 ? R.drawable.ic_pdf : R.drawable.ic_image, a4 ? "A4 纸张" : "图片比例",
+                preferred ? "默认 · " + detail : detail, preferred, () -> exportPdf(a4));
     }
 
     private void exportPdf(boolean a4) {
@@ -2091,9 +3353,16 @@ public final class MainActivity extends ComponentActivity {
 
     private void imageFormats() {
         ScanSheet sheet = new ScanSheet(this, ui, "保存当前页");
-        sheet.option(R.drawable.ic_image, "JPG", "通用格式，文件较小", false, () -> exportImage(false));
-        sheet.option(R.drawable.ic_image, "PNG", "无损保存，适合细线与文字", false, () -> exportImage(true));
+        boolean png = defaultPng();
+        addImageFormat(sheet, png, true);
+        addImageFormat(sheet, !png, false);
         sheet.show();
+    }
+
+    private void addImageFormat(ScanSheet sheet, boolean png, boolean preferred) {
+        String detail = png ? "无损保存，适合细线与文字" : "通用格式，文件较小";
+        sheet.option(R.drawable.ic_image, png ? "PNG" : "JPG", preferred ? "默认 · " + detail : detail,
+                preferred, () -> exportImage(png));
     }
 
     private void exportImage(boolean png) {
@@ -2112,63 +3381,340 @@ public final class MainActivity extends ComponentActivity {
         ScanDocument current = document;
         boolean handwriting = ScanRecognition.HANDWRITING.equals(reviewKey);
         task(handwriting ? "识别手写文字" : "识别文字", true, state -> {
-            org.json.JSONObject saved = rerun ? null : store.loadReview(current, reviewKey);
-            if (saved != null) return ScanRecognition.WordDraft.from(saved);
+            org.json.JSONObject saved = store.loadReview(current, reviewKey);
+            if (!rerun && saved != null) {
+                return new DraftCandidate<>(ScanRecognition.WordDraft.from(saved), false);
+            }
+            boolean replacing = saved != null || store.reviewIsOutdated(current, reviewKey);
             ScanRecognition.WordDraft draft = handwriting
                     ? ScanRecognition.handwriting(getAssets(), store, current, state::progress)
                     : ScanRecognition.word(getAssets(), store, current, state::progress);
-            if (draft.pages.stream().allMatch(page -> page.trim().isEmpty())
-                    && (rerun || store.reviewIsOutdated(current, reviewKey))) {
+            if (replacing && draft.pages.stream().allMatch(page -> page.trim().isEmpty())) {
                 throw new IOException("重新识别没有读到文字，已保留原校对稿");
             }
             state.check();
-            store.saveReview(current, reviewKey, draft.json());
-            return draft;
-        }, draft -> {
-            wordDraft = draft;
-            wordReviewKey = reviewKey;
-            nameFromDraft(wordDraft);
-            if (!rerun) handwritingOriginal = true;
-            wordDirty = false;
-            if (!rerun) wordPage = Math.max(0, indexOf(selectedPage));
-            screen = Screen.WORD;
-            render();
+            if (!replacing) store.saveReview(current, reviewKey, draft.json());
+            return new DraftCandidate<>(draft, replacing);
+        }, candidate -> {
+            Runnable open = () -> {
+                wordDraft = candidate.draft;
+                wordReviewKey = reviewKey;
+                nameFromDraft(wordDraft);
+                if (!rerun) handwritingOriginal = true;
+                wordDirty = false;
+                if (!rerun) wordPage = Math.max(0, indexOf(selectedPage));
+                clearBatch();
+                screen = Screen.WORD;
+                remember();
+                render();
+            };
+            if (candidate.replaces) {
+                String excerpt = candidate.draft.pages.stream().filter(page -> !page.trim().isEmpty()).findFirst().orElse("");
+                if (excerpt.length() > 420) excerpt = excerpt.substring(0, 420) + "…";
+                offerDraftReplacement(current, reviewKey, "新识别稿 · " + candidate.draft.pages.size()
+                        + " 页\n\n" + excerpt, candidate.draft::json, open);
+            } else open.run();
         }, () -> loadWord(reviewKey, rerun));
+    }
+
+    private static final class DraftCandidate<T> {
+        final T draft;
+        final boolean replaces;
+
+        DraftCandidate(T draft, boolean replaces) {
+            this.draft = draft;
+            this.replaces = replaces;
+        }
+    }
+
+    private interface DraftJson {
+        org.json.JSONObject get() throws org.json.JSONException;
+    }
+
+    private void offerDraftReplacement(ScanDocument source, String key, String preview, DraftJson json, Runnable open) {
+        new AlertDialog.Builder(this).setTitle("使用新识别稿？")
+                .setMessage(preview)
+                .setNegativeButton("保留现有稿", null)
+                .setPositiveButton("替换并校对", (dialog, which) -> task("保存新识别稿", false, state -> {
+                    store.saveReview(source, key, json.get());
+                    return true;
+                }, done -> open.run(), null)).show();
     }
 
     private void recognizeTables(String key) {
         checkDraft(key, () -> loadTables(key, false));
     }
 
-    private void chooseTableMode() {
-        new AlertDialog.Builder(this).setTitle("选择文字类型")
-                .setMessage("有手写填写、手写清单或印刷与手写混排时，请选手写或混合。")
-                .setPositiveButton("印刷表格", (dialog, which) -> recognizeTables(ScanRecognition.EXCEL))
-                .setNeutralButton("手写或混合", (dialog, which) -> recognizeTables(ScanRecognition.HAND_TABLE))
-                .setNegativeButton("取消", null).show();
+    private void chooseRecognitionMode(boolean table) {
+        if (currentPage() == null || !saveCrop(true)) return;
+        boolean[] selected = new boolean[document.pages.size()];
+        java.util.Arrays.fill(selected, true);
+        recognitionOptions(document, table, selected);
     }
 
-    private void choosePdfTableMode(List<PdfWorkspace.Page> picked, String title) {
-        new AlertDialog.Builder(this).setTitle("选择文字类型")
-                .setMessage("PDF 中有手写填写时，请选手写或混合。所有选中页通过质量检查后才会生成文件。")
-                .setPositiveButton("印刷表格", (dialog, which) -> exportPdfTables(picked, title, false))
-                .setNeutralButton("手写或混合", (dialog, which) -> exportPdfTables(picked, title, true))
-                .setNegativeButton("取消", null).show();
+    private void recognitionOptions(ScanDocument source, boolean table, boolean[] selected) {
+        String title = table ? "提取表格" : "提取文字";
+        String printedKey = table ? ScanRecognition.EXCEL : ScanRecognition.WORD;
+        String handKey = table ? ScanRecognition.HAND_TABLE : ScanRecognition.HANDWRITING;
+        int count = 0;
+        for (boolean value : selected) if (value) count++;
+        ScanSheet sheet = new ScanSheet(this, ui, title);
+        sheet.detail(source.name + " · 已选 " + count + " / " + selected.length + " 页");
+        if (selected.length > 1) {
+            sheet.option(R.drawable.ic_crop, "调整选页", null, false,
+                    () -> chooseScanRecognitionPages(source, table, selected));
+        }
+        if (count > 0) {
+            sheet.option(R.drawable.ic_text, "印刷", "开始提取", false,
+                    () -> recognizeSelected(source, table, selected, printedKey));
+            sheet.option(R.drawable.ic_edit, table ? "手写或混合" : "手写", "开始提取", false,
+                    () -> recognizeSelected(source, table, selected, handKey));
+        }
+        sheet.show();
     }
 
-    private void exportPdfTables(List<PdfWorkspace.Page> picked, String title, boolean handwriting) {
-        prepareFile(FileFormat.XLSX, title, (output, state) -> {
-            List<OfficeTable> tables = PdfTools.tables(pdfStore, picked, getAssets(), state::progress, handwriting);
-            OfficeExport.excel(tables, output);
-        });
+    private void chooseScanRecognitionPages(ScanDocument source, boolean table, boolean[] selected) {
+        String[] pages = new String[selected.length];
+        for (int i = 0; i < pages.length; i++) pages[i] = "第 " + originalPageNumber(source, i) + " 页";
+        boolean[] edited = selected.clone();
+        new AlertDialog.Builder(this).setTitle("选择要提取的扫描页")
+                .setMultiChoiceItems(pages, edited, (dialog, index, checked) -> edited[index] = checked)
+                .setNegativeButton("返回", (dialog, which) -> recognitionOptions(source, table, selected))
+                .setOnCancelListener(dialog -> recognitionOptions(source, table, selected))
+                .setPositiveButton("应用选页", (dialog, which) -> recognitionOptions(source, table, edited)).show();
+    }
+
+    private void recognizeSelected(ScanDocument source, boolean table, boolean[] selected, String key) {
+        List<ScanDocument.Page> pages = new ArrayList<>();
+        List<String> sourceNumbers = new ArrayList<>();
+        for (int i = 0; i < selected.length; i++) {
+            if (!selected[i]) continue;
+            pages.add(source.pages.get(i));
+            sourceNumbers.add(Integer.toString(originalPageNumber(source, i)));
+        }
+        if (pages.isEmpty()) return;
+        reviewReturn = Screen.DETAIL;
+        Runnable recognize = () -> {
+            if (table) recognizeTables(key);
+            else recognizeWord(key);
+        };
+        if (pages.size() == source.pages.size()) {
+            recognize.run();
+            return;
+        }
+        Screen origin = screen == Screen.EDITOR && editorReturn != Screen.DETAIL ? editorReturn : detailReturn;
+        task("准备所选扫描页", true, state -> prepareScanSubset(source, pages, sourceNumbers, state), subset -> {
+            screen = origin;
+            open(subset);
+            recognize.run();
+        }, () -> recognizeSelected(source, table, selected, key));
+    }
+
+    private ScanDocument prepareScanSubset(ScanDocument source, List<ScanDocument.Page> pages,
+            List<String> sourceNumbers, JobState state) throws IOException {
+        StringBuilder key = new StringBuilder(SUBSET).append(source.id).append('/').append(source.revision);
+        for (ScanDocument.Page page : pages) key.append('/').append(page.id);
+        String existing = preferences.getString(key.toString(), null);
+        ScanDocument saved = existing == null ? null : store.load(existing);
+        List<String> originalPositions = new ArrayList<>();
+        for (int i = 0; i < pages.size(); i++) {
+            originalPositions.add(pages.get(i).id + ":" + sourceNumbers.get(i));
+        }
+        String mapping = String.join(",", originalPositions);
+        if (saved != null && source.id.equals(preferences.getString(SUBSET_SOURCE + saved.id, null))
+                && matchesScanSubset(saved.pages, pages, preferences.getString(SUBSET_PAGES + saved.id, null), mapping)) {
+            return saved;
+        }
+        ScanDocument subset = store.newDocument().renamed(source.name + " · 选页").filed(source.folder).withPages(pages);
+        List<ScanDocument.Page> copied = new ArrayList<>();
+        boolean committed = false;
+        try {
+            for (int i = 0; i < pages.size(); i++) {
+                state.check();
+                ScanDocument.Page page = pages.get(i);
+                copied.add(page);
+                if (page.beforeFlatten != null) {
+                    copyScanPage(store.image(source, page.beforeFlatten), store.image(subset, page.beforeFlatten));
+                }
+                copyScanPage(store.image(source, page), store.image(subset, page));
+                state.progress(i + 1, pages.size());
+            }
+            state.check();
+            store.save(subset);
+            preferences.edit().putString(key.toString(), subset.id)
+                    .putString(SUBSET_SOURCE + subset.id, source.id)
+                    .putString(SUBSET_PAGES + subset.id, mapping).apply();
+            committed = true;
+            return subset;
+        } finally {
+            if (!committed) for (ScanDocument.Page page : copied) store.removeSource(subset, page);
+        }
+    }
+
+    static boolean matchesScanSubset(List<ScanDocument.Page> saved, List<ScanDocument.Page> selected,
+            String savedMapping, String expectedMapping) {
+        if (saved.size() != selected.size() || !expectedMapping.equals(savedMapping)) return false;
+        for (int i = 0; i < selected.size(); i++) {
+            if (!selected.get(i).id.equals(saved.get(i).id)) return false;
+        }
+        return true;
+    }
+
+    private static void copyScanPage(File source, File destination) throws IOException {
+        ScanStore.ensureDirectory(destination.getParentFile());
+        try {
+            android.system.Os.link(source.getAbsolutePath(), destination.getAbsolutePath());
+        } catch (android.system.ErrnoException unavailable) {
+            java.nio.file.Files.copy(source.toPath(), destination.toPath());
+        }
+    }
+
+    private int originalPageNumber(ScanDocument owner, int position) {
+        String stored = preferences.getString(SUBSET_PAGES + owner.id, null);
+        if (stored == null || position < 0 || position >= owner.pages.size()) return position + 1;
+        String prefix = owner.pages.get(position).id + ":";
+        for (String mapping : stored.split(",")) {
+            if (mapping.startsWith(prefix)) return Integer.parseInt(mapping.substring(prefix.length()));
+        }
+        return position + 1;
+    }
+
+    private void openSubsetSource(String id) {
+        try {
+            ScanDocument source = store.load(id);
+            if (source == null) error("关联的原扫描件已移除", null);
+            else open(source);
+        } catch (IOException unreadable) {
+            error("无法打开关联的原扫描件", null);
+        }
+    }
+
+    private void showSubsetDrafts(LinearLayout body, String id) {
+        Set<String> children = new LinkedHashSet<>();
+        for (java.util.Map.Entry<String, ?> entry : preferences.getAll().entrySet()) {
+            if (entry.getKey().startsWith(SUBSET_SOURCE) && id.equals(entry.getValue())) {
+                children.add(entry.getKey().substring(SUBSET_SOURCE.length()));
+            }
+        }
+        for (String child : children) {
+            try {
+                ScanDocument result = store.load(child);
+                if (result == null || !hasReview(result)) continue;
+                List<String> numbers = new ArrayList<>();
+                for (int i = 0; i < result.pages.size(); i++) {
+                    numbers.add(Integer.toString(originalPageNumber(result, i)));
+                }
+                body.addView(ui.quietButton("选页稿 · 原第 " + String.join("、", numbers) + " 页",
+                        ScanUi.INK, () -> open(result)));
+            } catch (IOException unreadable) {
+                // The linked result can still be located in the file list if recovered.
+            }
+        }
+    }
+
+    private void choosePdfRecognition(List<PdfWorkspace.Page> picked, String title, boolean table) {
+        ScanSheet sheet = new ScanSheet(this, ui, table ? "提取表格" : "提取文字");
+        sheet.detail(title + " · 已选 " + picked.size() + " 页");
+        sheet.option(R.drawable.ic_crop, "调整选页", null, false,
+                () -> managePdfPages(table ? PdfTool.EXCEL : PdfTool.WORD));
+        sheet.option(R.drawable.ic_text, "印刷", "开始提取", false,
+                () -> openPdfReview(picked, title, table, false));
+        sheet.option(R.drawable.ic_edit, table ? "手写或混合" : "手写", "开始提取", false,
+                () -> openPdfReview(picked, title, table, true));
+        sheet.show();
+    }
+
+    private void openPdfReview(List<PdfWorkspace.Page> pages, String title, boolean table, boolean hand) {
+        if (pages.size() > ScanStore.PAGE_LIMIT) {
+            error("一份识别稿最多 " + ScanStore.PAGE_LIMIT + " 页，请减少所选页面", this::managePdfPages);
+            return;
+        }
+        String mode = table ? (hand ? ScanRecognition.HAND_TABLE : ScanRecognition.EXCEL)
+                : (hand ? ScanRecognition.HANDWRITING : ScanRecognition.WORD);
+        String fingerprint = pdfReviewKey(pages);
+        task(table ? "提取 PDF 表格" : "提取 PDF 文字", true, state -> {
+            String id = preferences.getString(fingerprint, null);
+            ScanDocument copy = id == null ? null : store.load(id);
+            if (copy == null) {
+                copy = copyPdfReviewSource(pages, title, state);
+                preferences.edit().putString(fingerprint, copy.id)
+                        .putString("pdfReviewSource/" + copy.id, title).apply();
+            }
+            if (store.loadReview(copy, mode) == null && !store.reviewIsOutdated(copy, mode)) {
+                if (table) {
+                    List<OfficeTable> tables = PdfTools.tables(pdfStore, pages, getAssets(), state::progress, hand);
+                    ScanRecognition.TableDraft draft = new ScanRecognition.TableDraft(tables, java.util.Collections.emptyList()).checked(mode);
+                    state.check();
+                    store.saveReview(copy, mode, draft.json());
+                } else if (!hand) {
+                    List<String> words = PdfTools.text(pdfStore, pages, getAssets(), state::progress);
+                    ScanRecognition.WordDraft draft = new ScanRecognition.WordDraft(words);
+                    state.check();
+                    store.saveReview(copy, mode, draft.json());
+                }
+            }
+            return copy;
+        }, copy -> {
+            document = copy;
+            selectedPage = copy.pages.get(0).id;
+            detailReturn = Screen.PDF;
+            reviewReturn = Screen.DETAIL;
+            screen = Screen.DETAIL;
+            remember();
+            render();
+            if (table) recognizeTables(mode);
+            else recognizeWord(mode);
+        }, () -> openPdfReview(pages, title, table, hand));
+    }
+
+    private static String pdfReviewKey(List<PdfWorkspace.Page> pages) {
+        StringBuilder key = new StringBuilder("pdfReview:");
+        for (PdfWorkspace.Page page : pages) {
+            key.append(page.source).append('/').append(page.index).append('/').append(page.turns).append(';');
+        }
+        return key.toString();
+    }
+
+    private ScanDocument copyPdfReviewSource(List<PdfWorkspace.Page> pages, String title, JobState state)
+            throws IOException {
+        ScanDocument copy = store.newDocument().renamed(title + " · PDF 校对");
+        List<ScanDocument.Page> added = new ArrayList<>();
+        boolean saved = false;
+        try {
+            for (int i = 0; i < pages.size(); i++) {
+                state.check();
+                ScanDocument.Page target = new ScanDocument.Page(ScanStore.newId(), 0,
+                        CropQuad.FULL, ScanDocument.Filter.ORIGINAL);
+                File file = store.image(copy, target);
+                ScanStore.ensureDirectory(file.getParentFile());
+                added.add(target);
+                Bitmap bitmap = PdfTools.render(pdfStore, pages.get(i), ScanImages.EXPORT_EDGE);
+                try (OutputStream output = new BufferedOutputStream(new FileOutputStream(file))) {
+                    if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                        throw new IOException("无法保存 PDF 校对原图");
+                    }
+                } finally {
+                    bitmap.recycle();
+                }
+                state.progress(i + 1, pages.size());
+            }
+            state.check();
+            copy = copy.withPages(added);
+            store.save(copy);
+            saved = true;
+            return copy;
+        } finally {
+            if (!saved) for (ScanDocument.Page page : added) store.removeSource(copy, page);
+        }
     }
 
     private void loadTables(String key, boolean rerun) {
         ScanDocument current = document;
         boolean handwriting = ScanRecognition.HAND_TABLE.equals(key);
         task(handwriting ? "识别手写表格" : "识别表格", true, state -> {
-            org.json.JSONObject saved = rerun ? null : store.loadReview(current, key);
-            if (saved != null) return ScanRecognition.TableDraft.from(saved);
+            org.json.JSONObject saved = store.loadReview(current, key);
+            if (!rerun && saved != null) return new DraftCandidate<>(ScanRecognition.TableDraft.from(saved), false);
+            boolean replacing = saved != null || store.reviewIsOutdated(current, key);
             ScanRecognition.TableDraft draft = ScanRecognition.checkedTables(
                     getAssets(), store, current, handwriting, state::progress);
             if (draft.tables.isEmpty()) {
@@ -2176,9 +3722,15 @@ public final class MainActivity extends ComponentActivity {
                         : "未识别到表格。可先裁切到表格区域、增强清晰度后重试");
             }
             state.check();
-            store.saveReview(current, key, draft.json());
-            return draft;
-        }, draft -> {
+            if (!replacing) store.saveReview(current, key, draft.json());
+            return new DraftCandidate<>(draft, replacing);
+        }, candidate -> {
+            ScanRecognition.TableDraft draft = candidate.draft;
+            if (candidate.replaces) {
+                offerDraftReplacement(current, key, summarizeTables(draft.tables), draft::json,
+                        () -> openTableDraft(key, draft, rerun));
+                return;
+            }
             if (!rerun && !draft.checkedFor(key)) {
                 new AlertDialog.Builder(this).setTitle("旧版校对稿未经过质量检查")
                         .setMessage("原有修改已保留。可对照原图继续校对，或按所选文字类型重新识别。")
@@ -2189,6 +3741,18 @@ public final class MainActivity extends ComponentActivity {
             }
             openTableDraft(key, draft, rerun);
         }, () -> loadTables(key, rerun));
+    }
+
+    private String summarizeTables(List<OfficeTable> tables) {
+        StringBuilder summary = new StringBuilder(tables.size() + " 张表格");
+        for (OfficeTable table : tables.subList(0, Math.min(tables.size(), 4))) {
+            summary.append("\n第 ").append(table.page).append(" 页 · ")
+                    .append(table.rows).append(" 行 × ").append(table.columns).append(" 列");
+            for (OfficeTable.Cell cell : table.cells.subList(0, Math.min(table.cells.size(), 4))) {
+                summary.append(" · ").append(cell.text.length() > 24 ? cell.text.substring(0, 24) + "…" : cell.text);
+            }
+        }
+        return summary.toString();
     }
 
     private void openTableDraft(String key, ScanRecognition.TableDraft draft, boolean rerun) {
@@ -2205,7 +3769,9 @@ public final class MainActivity extends ComponentActivity {
                     }
                 }
             }
+            clearBatch();
             screen = Screen.EXCEL;
+            remember();
             render();
     }
 
@@ -2216,21 +3782,30 @@ public final class MainActivity extends ComponentActivity {
                 recognize.run();
                 return;
             }
-            new AlertDialog.Builder(this).setTitle("扫描页已有调整")
-                    .setMessage("可以按原页序导出之前的校对稿。重新识别成功后，新结果将替换旧稿。")
+            new AlertDialog.Builder(this).setTitle("原图已更新")
+                    .setMessage("可查看并按原页序导出之前的校对稿。重新识别后，可以先预览新稿再决定是否替换。")
                     .setNegativeButton("取消", null)
-                    .setNeutralButton("导出旧稿", (dialog, which) -> {
+                    .setNeutralButton("查看旧稿", (dialog, which) -> {
                         boolean excel = ScanRecognition.EXCEL.equals(type) || ScanRecognition.HAND_TABLE.equals(type);
                         Runnable export = () -> prepareFile(excel ? FileFormat.XLSX : FileFormat.DOCX, current.name + " - 调整前",
                                 (stream, exportState) -> {
                                     if (excel) OfficeExport.excel(ScanRecognition.TableDraft.from(previous).tables, stream);
                                     else OfficeExport.word(ScanRecognition.WordDraft.from(previous).pages, stream);
                                 });
-                        if (excel) new AlertDialog.Builder(this).setTitle("确认旧表格内容")
-                                .setMessage("旧稿不会按当前图片重新识别。请核对漏项、错字和行列对应后再导出。")
-                                .setNegativeButton("取消", null)
-                                .setPositiveButton("已核对，导出", (d, w) -> export.run()).show();
-                        else export.run();
+                        try {
+                            String content = excel ? summarizeTables(ScanRecognition.TableDraft.from(previous).tables)
+                                    : String.join("\n\n", ScanRecognition.WordDraft.from(previous).pages);
+                            ScrollView scroll = new ScrollView(this);
+                            TextView text = ui.text(content, 15, ScanUi.INK);
+                            text.setTextIsSelectable(true);
+                            text.setPadding(ui.dp(20), ui.dp(8), ui.dp(20), ui.dp(8));
+                            scroll.addView(text);
+                            new AlertDialog.Builder(this).setTitle("原图更新前的识别稿").setView(scroll)
+                                    .setNegativeButton("关闭", null)
+                                    .setPositiveButton("导出旧稿", (d, w) -> export.run()).show();
+                        } catch (org.json.JSONException unreadable) {
+                            error("无法读取旧稿", null);
+                        }
                     })
                     .setPositiveButton("重新识别", (dialog, which) -> recognize.run()).show();
         }, null);
@@ -2244,7 +3819,10 @@ public final class MainActivity extends ComponentActivity {
         layout.addView(ui.rule());
         wordPage = Math.max(0, Math.min(wordPage, wordDraft.pages.size() - 1));
         final int page = wordPage;
-        layout.addView(reviewBar("第 " + (page + 1) + " / " + wordDraft.pages.size() + " 页",
+        String position = preferences.contains(SUBSET_SOURCE + document.id)
+                ? "原第 " + originalPageNumber(document, page) + " 页 · " + (page + 1) + "/" + wordDraft.pages.size()
+                : "第 " + (page + 1) + " / " + wordDraft.pages.size() + " 页";
+        layout.addView(reviewBar(position,
                 page > 0 ? () -> turnWordPage(page - 1) : null,
                 page + 1 < wordDraft.pages.size() ? () -> turnWordPage(page + 1) : null,
                 handwriting ? (handwritingOriginal ? "收起原稿" : "展开原稿") : "看原图", () -> {
@@ -2382,7 +3960,9 @@ public final class MainActivity extends ComponentActivity {
         OfficeTable current = tables.get(tableIndex);
         TableGridView grid = new TableGridView(this, ui, current, this::editCell);
         tableGrid = grid;
-        String tableLabel = "第 " + current.page + " 页 · " + (tableIndex + 1) + "/" + tables.size();
+        String pagePrefix = preferences.contains(SUBSET_SOURCE + document.id) ? "原第 " : "第 ";
+        String tableLabel = pagePrefix + originalPageNumber(document, current.page - 1) + " 页 · "
+                + (tableIndex + 1) + "/" + tables.size();
         layout.addView(reviewBar(tableLabel,
                 tableIndex > 0 ? () -> turnTable(-1) : null,
                 tableIndex + 1 < tables.size() ? () -> turnTable(1) : null,
@@ -2443,7 +4023,9 @@ public final class MainActivity extends ComponentActivity {
         LinearLayout footer = ui.horizontal();
         footer.setBackgroundColor(ScanUi.SURFACE);
         footer.addView(tip, new LinearLayout.LayoutParams(0, ui.wrap(), 1));
-        if (handwriting) {
+        if (handwriting || unreviewedCount() > 0) {
+            if (uncertainCellCount() > 0) footer.addView(ui.quietButton("先核对存疑", ScanUi.ACCENT,
+                    () -> nextPendingCell(null, true)));
             pendingCells = ui.quietButton("", ScanUi.ACCENT, this::nextPendingCell);
             footer.addView(pendingCells);
             refreshPendingCells();
@@ -2871,30 +4453,28 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void exportExcel() {
-        if (!tableDraft.checkedFor(tableReviewKey)) {
-            new AlertDialog.Builder(this).setTitle("请先核对旧版识别稿")
-                    .setMessage("这份稿件没有新版质量检查记录，可能含有漏项、错字或错列。原有修改会保留。")
-                    .setNegativeButton("继续校对", null)
-                    .setNeutralButton("重新识别", (dialog, which) -> loadTables(tableReviewKey, true))
-                    .setPositiveButton("我已核对，导出", (dialog, which) -> confirmExcel()).show();
+        boolean legacy = !tableDraft.checkedFor(tableReviewKey);
+        int pending = unreviewedCount();
+        int uncertain = uncertainCellCount();
+        boolean draft = pending > 0 || legacy;
+        if (!draft && !ScanRecognition.EXCEL.equals(tableReviewKey)) {
+            writeExcel();
             return;
         }
-        confirmExcel();
-    }
-
-    private void confirmExcel() {
-        int pending = ScanRecognition.HAND_TABLE.equals(tableReviewKey) ? unreviewedCount() : 0;
-        if (pending > 0) {
-            new AlertDialog.Builder(this).setTitle("还有 " + pending + " 格未核对")
-                    .setMessage("可先对照原图确认，也可按当前内容生成 Excel。")
-                    .setNegativeButton("仍然导出", (d, which) -> writeExcel())
-                    .setPositiveButton("继续核对", (d, which) -> nextPendingCell()).show();
-        } else if (ScanRecognition.EXCEL.equals(tableReviewKey)) {
-            new AlertDialog.Builder(this).setTitle("确认表格内容")
-                    .setMessage("质量检查不能保证每个字都正确，请核对编号、金额及行列对应。")
-                    .setNegativeButton("继续校对", null)
-                    .setPositiveButton("已核对，导出", (dialog, which) -> writeExcel()).show();
-        } else writeExcel();
+        StringBuilder message = new StringBuilder();
+        if (legacy) message.append("旧版识别稿缺少质量检查记录，请对照原图。\n");
+        if (pending > 0) message.append("还有 ").append(pending).append(" 格未核对，其中 ")
+                .append(uncertain).append(" 格存疑。\n");
+        message.append("请核对编号、金额及行列对应。");
+        AlertDialog.Builder confirm = new AlertDialog.Builder(this)
+                .setTitle("确认表格内容")
+                .setMessage(message.toString())
+                .setNegativeButton("继续校对", (dialog, which) -> {
+                    if (pending > 0) nextPendingCell(null, uncertain > 0);
+                })
+                .setPositiveButton(draft ? "导出当前草稿" : "已核对，导出", (dialog, which) -> writeExcel());
+        if (legacy) confirm.setNeutralButton("重新识别", (dialog, which) -> loadTables(tableReviewKey, true));
+        confirm.show();
     }
 
     private void writeExcel() {
@@ -2903,6 +4483,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void prepareFile(FileFormat format, String title, FileWriter generator) {
+        String documentId = screen == Screen.PDF || document == null ? null : document.id;
         task("生成 " + format.label, true, state -> {
             File directory = exportDirectory();
             ScanStore.ensureDirectory(directory);
@@ -2922,6 +4503,7 @@ public final class MainActivity extends ComponentActivity {
             }
         }, file -> {
             pendingFile = file.getName();
+            pendingDocumentId = documentId;
             pendingName = fileName(title, format.extension);
             pendingFormat = format;
             launchSave();
@@ -2952,7 +4534,15 @@ public final class MainActivity extends ComponentActivity {
             error("系统未返回保存位置，请重新选择", this::launchSave);
             return;
         }
-        savePendingOutput(data.getData());
+        Uri destination = data.getData();
+        if ((data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0) {
+            try {
+                getContentResolver().takePersistableUriPermission(destination, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (SecurityException providerDidNotGrant) {
+                // Current access can still be used for the initial save.
+            }
+        }
+        savePendingOutput(destination);
     }
 
     private void savePendingOutput(Uri destination) {
@@ -2963,15 +4553,24 @@ public final class MainActivity extends ComponentActivity {
         }
         String name = pendingName;
         FileFormat format = pendingFormat;
+        String documentId = pendingDocumentId;
+        long bytes = file.length();
         task("保存 " + format.label, false, state -> {
             try {
                 ScanExport.save(getContentResolver(), file, destination);
             } catch (IOException failure) {
                 return null;
             }
-            return ScanExport.displayName(getContentResolver(), destination, name);
-        }, savedName -> {
-            if (savedName == null) {
+            String actualName = ScanExport.displayName(getContentResolver(), destination, name);
+            boolean recorded = true;
+            try {
+                exportHistory.record(documentId, actualName, format.name(), destination, bytes);
+            } catch (IOException failure) {
+                recorded = false;
+            }
+            return new SavedOutput(actualName, recorded);
+        }, saved -> {
+            if (saved == null) {
                 new AlertDialog.Builder(this).setMessage("未能保存到所选位置")
                         .setNegativeButton("取消保存", (dialog, which) -> discardPendingOutput())
                         .setNeutralButton("另选位置", (dialog, which) -> launchSave())
@@ -2981,12 +4580,28 @@ public final class MainActivity extends ComponentActivity {
             }
             clearPendingOutput();
             ScanSheet sheet = new ScanSheet(this, ui, "文件已保存");
-            sheet.detail(savedName);
+            sheet.detail(saved.name + " · " + format.label + " · " + formattedBytes(bytes)
+                    + "\n" + savedLocation(destination) + (saved.recorded ? "" : "\n导出记录未写入"));
             sheet.option(R.drawable.ic_document, "打开文件", null, false, () -> openOutput(destination, format));
-            sheet.option(R.drawable.ic_share, "分享文件", null, false, () -> share(file, savedName, format));
+            sheet.option(R.drawable.ic_share, "分享文件", null, false, () -> shareOutput(destination, format));
+            sheet.option(R.drawable.ic_document, "在文件中查看", null, false, () -> {
+                fileFilter = FileFilter.EXPORTS;
+                screen = Screen.FILES;
+                render();
+            });
             sheet.option(R.drawable.ic_check, "完成", null, false, () -> {});
             sheet.show();
         }, this::launchSave);
+    }
+
+    private static final class SavedOutput {
+        final String name;
+        final boolean recorded;
+
+        SavedOutput(String name, boolean recorded) {
+            this.name = name;
+            this.recorded = recorded;
+        }
     }
 
     private void discardPendingOutput() {
@@ -2997,6 +4612,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void clearPendingOutput() {
         pendingFile = null;
+        pendingDocumentId = null;
         pendingName = null;
         pendingFormat = null;
     }
@@ -3103,18 +4719,23 @@ public final class MainActivity extends ComponentActivity {
                     if (!complete(state)) discardResult(result);
                     else if (state.cancelled.get() && (result instanceof AutoCloseable
                             || result instanceof ScanRecognition.WordDraft
-                            || result instanceof ScanRecognition.TableDraft)) {
+                            || result instanceof ScanRecognition.TableDraft
+                            || result instanceof DraftCandidate<?>)) {
                         discardResult(result);
                         toast("已取消");
                     } else success.show(result);
                 });
             } catch (CancellationException cancelled) {
                 main.post(() -> {
-                    if (complete(state)) toast("已取消");
+                    if (complete(state)) {
+                        toast("已取消");
+                        if (preferences.contains(INCOMING_FILES)) render();
+                    }
                 });
             } catch (Exception failure) {
                 main.post(() -> {
                     if (complete(state)) {
+                        if (preferences.contains(INCOMING_FILES)) render();
                         if (state.cancelled.get()) toast("已取消");
                         else if (failure instanceof ScanRecognition.UnreliableRecognition) {
                             recognitionIssue((ScanRecognition.UnreliableRecognition) failure, retry);
@@ -3225,11 +4846,22 @@ public final class MainActivity extends ComponentActivity {
         AlertDialog.Builder dialog = new AlertDialog.Builder(this)
                 .setTitle((screen == Screen.PDF ? "所选第 " : "第 ") + failure.page + " 页识别不可靠")
                 .setMessage(hint + "\n未保存新表格，原图和已有校对稿已保留。")
-                .setNegativeButton("返回原图", null);
+                .setNegativeButton("返回原图", (d, which) -> {
+                    if (screen == Screen.PDF) return;
+                    if (document == null || document.pages.isEmpty()) return;
+                    selectedPage = document.pages.get(Math.max(0, Math.min(failure.page - 1,
+                            document.pages.size() - 1))).id;
+                    if (screen == Screen.DETAIL) editFromDetail(true);
+                    else if (screen == Screen.EDITOR) {
+                        pendingCrop = null;
+                        cropping = true;
+                        render();
+                    }
+                });
         if (retry != null) dialog.setPositiveButton("重试", (d, which) -> retry.run());
         dialog.setNeutralButton("选择文字类型", (d, which) -> {
             if (screen == Screen.PDF) runPdfTool(PdfTool.EXCEL);
-            else chooseTableMode();
+            else chooseRecognitionMode(true);
         });
         dialog.show();
     }

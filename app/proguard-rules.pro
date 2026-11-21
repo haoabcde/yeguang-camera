@@ -14,6 +14,10 @@
 -keep public class androidx.camera.view.transform.** { public *; }
 -keep interface androidx.camera.core.ImageProxy { *; }
 -keep class androidx.core.content.FileProvider { public *; }
+# The separately optimized acceptance APK drives the camera's retained review.
+-keep public class androidx.lifecycle.ViewModelProvider { public *; }
+-keep interface androidx.lifecycle.ViewModelStoreOwner { *; }
+-keep public class androidx.lifecycle.MutableLiveData { public *; }
 -keep class com.google.android.gms.tasks.Tasks { public *; }
 -keep class com.google.mlkit.vision.common.InputImage { public *; }
 -keep class com.google.mlkit.vision.text.Text { public *; }

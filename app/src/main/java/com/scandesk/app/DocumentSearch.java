@@ -22,11 +22,23 @@ final class DocumentSearch {
 
     static final class Hit {
         final String documentId, name, pageId, context;
+        final String reviewKey;
+        final int tableIndex, row, column;
+
         Hit(ScanDocument doc, ScanDocument.Page page, String context) {
+            this(doc, page, context, null, -1, -1, -1);
+        }
+
+        Hit(ScanDocument doc, ScanDocument.Page page, String context, String reviewKey,
+                int tableIndex, int row, int column) {
             this.documentId = doc.id;
             this.name = doc.name;
             this.pageId = page == null ? null : page.id;
             this.context = context;
+            this.reviewKey = reviewKey;
+            this.tableIndex = tableIndex;
+            this.row = row;
+            this.column = column;
         }
     }
 
@@ -56,7 +68,7 @@ final class DocumentSearch {
                 JSONObject draft = review(store, doc, ScanRecognition.WORD);
                 JSONArray edited = draft.optJSONArray("pages");
                 JSONArray handwritten = review(store, doc, ScanRecognition.HANDWRITING).optJSONArray("pages");
-                Map<Integer, String> tableMatches = tableMatches(store, doc, needle);
+                Map<Integer, Hit> tableMatches = tableMatches(store, doc, needle);
                 JSONObject index = review(store, doc, INDEX);
                 boolean cacheWritable = true;
                 for (int i = 0; i < doc.pages.size(); i++) {
@@ -84,11 +96,22 @@ final class DocumentSearch {
                     if (text == null && handPage == null) {
                         result.missingPages++;
                     }
-                    String snippet = tableMatches.get(i + 1);
-                    if (snippet == null) snippet = excerpt(handPage, needle);
-                    if (snippet == null) snippet = excerpt(text, needle);
+                    Hit tableHit = tableMatches.get(i + 1);
+                    if (tableHit != null) {
+                        result.hits.add(tableHit);
+                        pageMatch = true;
+                        continue;
+                    }
+                    String key = ScanRecognition.HANDWRITING;
+                    String snippet = excerpt(handPage, needle);
+                    if (snippet == null) {
+                        snippet = excerpt(text, needle);
+                        key = edited != null && edited.optString(i, null) != null ? ScanRecognition.WORD : null;
+                    }
                     if (snippet != null) {
-                        result.hits.add(new Hit(doc, page, "第 " + (i + 1) + " 页  ·  " + snippet));
+                        String type = key == null ? "索引正文" : key.equals(ScanRecognition.WORD) ? "文字稿" : "手写稿";
+                        result.hits.add(new Hit(doc, page, "第 " + (i + 1) + " 页 · " + type + " · " + snippet,
+                                key, -1, -1, -1));
                         pageMatch = true;
                     }
                 }
@@ -101,18 +124,23 @@ final class DocumentSearch {
 
     // A page can contain several edited tables. Search cells individually so adjacent values
     // cannot create a spurious identifier, and keep one result per source page.
-    private static Map<Integer, String> tableMatches(ScanStore store, ScanDocument doc, String needle) {
-        Map<Integer, String> pages = new HashMap<>();
+    private static Map<Integer, Hit> tableMatches(ScanStore store, ScanDocument doc, String needle) {
+        Map<Integer, Hit> pages = new HashMap<>();
         for (String key : new String[]{ScanRecognition.HAND_TABLE, ScanRecognition.EXCEL}) {
             JSONObject json = review(store, doc, key);
             if (!json.has("tables")) continue;
             try {
-                for (OfficeTable table : ScanRecognition.TableDraft.from(json).tables) {
-                    if (pages.get(table.page) != null) continue;
+                List<OfficeTable> tables = ScanRecognition.TableDraft.from(json).tables;
+                for (int i = 0; i < tables.size(); i++) {
+                    OfficeTable table = tables.get(i);
+                    if (table.page < 1 || table.page > doc.pages.size() || pages.containsKey(table.page)) continue;
                     for (OfficeTable.Cell cell : table.cells) {
                         String snippet = excerpt(cell.text, needle);
                         if (snippet != null) {
-                            pages.put(table.page, (ScanRecognition.HAND_TABLE.equals(key) ? "手写表格 · " : "表格 · ") + snippet);
+                            String type = ScanRecognition.HAND_TABLE.equals(key) ? "手写表格" : "印刷表格";
+                            String context = "第 " + table.page + " 页 · " + type + " · " + snippet;
+                            pages.put(table.page, new Hit(doc, doc.pages.get(table.page - 1), context,
+                                    key, i, cell.row, cell.column));
                             break;
                         }
                     }
