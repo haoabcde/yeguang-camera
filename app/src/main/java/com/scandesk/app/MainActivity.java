@@ -965,7 +965,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void loadImage(ScanDocument owner, ScanDocument.Page page, boolean original, boolean thumb,
             EditorView.ImageResult result) {
-        String key = owner.id + "/" + page.id + ":" + page.rotation + ":" + original + ":" + thumb;
+        String key = owner.id + ":" + owner.revision + "/" + page.id + ":" + page.rotation + ":" + original + ":" + thumb;
         if (!original) key += ":" + page.crop.hashCode() + ":" + page.filter.name();
         final String cacheKey = key;
         Bitmap cached = images.get(cacheKey);
@@ -2791,7 +2791,7 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         ScanDocument.Page page = owner.pages.get(position).filter(ScanDocument.Filter.ORIGINAL);
-        String key = owner.id + "/" + page.id + ":cell:" + page.rotation + ":" + page.crop.hashCode();
+        String key = owner.id + ":" + owner.revision + "/" + page.id + ":cell:" + page.rotation + ":" + page.crop.hashCode();
         previews.execute(() -> {
             Bitmap section = null;
             try {
