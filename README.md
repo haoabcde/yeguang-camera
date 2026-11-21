@@ -6,7 +6,7 @@
 
 ## 使用
 
-**安装**　从最新版本的附件中下载 ARM64 APK，适用于 Android 9 及以上的 ARM64 手机。[下载页光相机](https://github.com/haoabcde/yeguang-camera/releases/latest)
+**安装**　从最新版本的附件中下载 ARM64 APK，适用于 Android 9 及以上的 ARM64 手机。[下载页光相机](https://github.com/haoabcde/yeguang-camera/releases)
 
 | 手头的材料 | 在应用中可以做什么 |
 | --- | --- |
