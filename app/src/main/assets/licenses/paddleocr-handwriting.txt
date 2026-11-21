@@ -1,0 +1,21 @@
+PaddleOCR Android text-line components
+Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+License: Apache License 2.0 (see paddleocr.txt).
+Compiled without changes from commit dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf.
+https://github.com/PaddlePaddle/PaddleOCR/tree/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr
+Included: OCRBox; BitmapUtils, ImageUtils, MathUtils; DetPreprocessor, RecPreprocessor;
+DBPostProcessor, PolygonUnclip, QuadGeometry, QuadTextCrop, BoxSorter, CTCDecoder.
+The application supplies its own session lifecycle, bounds and review/export interface.
+
+PP-OCRv5_mobile_det_onnx
+Publisher: PaddlePaddle. License: Apache License 2.0 (see paddleocr.txt).
+https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx/tree/e6f4fa85f00e168c862bc462aebca69eef9b3d3d
+The bundled inference.onnx is unmodified and is named ppocrv5-mobile-det.onnx.
+SHA-256: a431985659dc921974177a95adcfbb90fd9e51989a5e04d70d0b75f597b6e61d
+
+PP-OCRv5_server_rec_onnx (local handwriting table recognition)
+Publisher: PaddlePaddle. License: Apache License 2.0 (see paddleocr.txt).
+https://huggingface.co/PaddlePaddle/PP-OCRv5_server_rec_onnx/tree/b70df217f4fd99d14f970bad092cebe7d74cc4d1
+The bundled inference.onnx is unmodified and named ppocrv5-server-rec.onnx.
+SHA-256: d9dc333c9c7b042c6dffb8e33d72b6f65c9c1d463d0a3c2f78174fea55e94752
+84,503,027 bytes. Runs on device; the server name identifies the model family, not a network service.
